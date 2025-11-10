@@ -76,24 +76,12 @@ A lightweight web+API tool that takes a drug input (name or NDC), SIG, and days�
 
 ## 6) Integrations & Data Sources
 
+**Note**: Detailed technical specifications for external API integrations are documented in `docs/architecture.md` §6 (External APIs).
+
 * **RxNorm**: name→RxCUI normalization; NDC↔RxCUI crosswalk. Do **not** use for activity status.
-  * **Endpoint**: RxNav RESTful API (`https://rxnav.nlm.nih.gov/REST/`)
-  * **Key Endpoints**:
-    * `findRxcuiByString?name={drug_name}` - Name to RxCUI
-    * `rxcui/{rxcui}/ndcs` - RxCUI to NDC mapping
-    * `approximateTerm?term={drug_name}` - Approximate matching (fallback)
-  * **Authentication**: None required (public API)
-  * **Rate Limiting**: 10 req/sec per function instance (conservative)
-  * **Caching**: 1 hour TTL (in-memory)
 * **FDA NDC Directory (Source of Truth)**: authoritative for **NDC activity status, package sizes, and marketing status**. If FDA and RxNorm disagree, trust FDA for status/packaging and RxNorm for ID mapping.
-  * **Endpoint**: openFDA API (`https://api.fda.gov/drug/ndc.json`)
-  * **Key Endpoints**:
-    * `search=product_ndc:{ndc}` - Lookup by NDC
-    * `search=brand_name:{name}` - Search by brand name
-  * **Authentication**: None required (public API)
-  * **Rate Limiting**: 3 req/sec per instance (openFDA limit: 240/min)
-  * **Caching**: 24 hours TTL (in-memory)
 * **API Execution**: Parallel calls to RxNorm and FDA (no dependencies between them)
+* **OpenAI API**: Used as fallback for SIG parsing when rules-based parser fails (see §8)
 * Optional future: internal formulary/preferred NDC lists to bias ranking.
 
 ---
@@ -135,141 +123,41 @@ A lightweight web+API tool that takes a drug input (name or NDC), SIG, and days�
 
 ---
 
-## 9) API Spec (v1)
+## 9) API Specification
 
-**Endpoint**: `POST /api/v1/compute`
+**Note**: Complete API specification including request/response schemas, error codes, authentication, and rate limiting details are documented in `docs/architecture.md` §8 (API Specification).
 
-**Request**
-
-```json
-{
-  "drug_input": "amoxicillin 500 mg cap",
-  "sig": "1 cap PO BID",
-  "days_supply": 30,
-  "preferred_ndcs": ["<optional NDCs>"],
-  "quantity_unit_override": "cap"
-}
-```
-
-**Response**
-
-```json
-{
-  "rxnorm": { "rxcui": "12345", "name": "amoxicillin 500 mg cap" },
-  "computed": { "dose_unit": "cap", "per_day": 2, "total_qty": 60, "days_supply": 30 },
-  "ndc_selection": {
-    "chosen": { "ndc": "00000-1111-22", "pkg_size": 60, "active": true, "overfill": 0, "packs": 1 },
-    "alternates": [
-      { "ndc": "00000-3333-44", "pkg_size": 30, "active": true, "overfill": 0, "packs": 2 }
-    ]
-  },
-  "flags": {
-    "inactive_ndcs": ["00000-9999-99"],
-    "mismatch": false,
-    "notes": ["Converted BID to 2/day"],
-    "error_code": null
-  }
-}
-```
-
-**Errors**
-
-* `400` invalid input; `422` unparseable SIG; `424` dependency failure (RxNorm/FDA timeout); `500` internal.
-* Always include a deterministic `error_code` and `detail`; when upstream is down, include `retry_after_ms`.
-
-**Error Response Schema**
-
-```json
-{
-  "error": "Error message in plain language",
-  "error_code": "validation_error" | "parse_error" | "dependency_failure" | "internal_error",
-  "detail": "Additional context or guidance",
-  "retry_after_ms": 5000,
-  "field_errors": [
-    {
-      "field": "drug_input",
-      "message": "Drug input is required"
-    }
-  ]
-}
-```
-
-**Authentication**
-
-* **MVP**: Static API key via Firebase Secret Manager (optional, can be enabled per environment)
-* **Request Header**: `Authorization: Bearer <API_KEY>` (if API key authentication enabled)
-* **CORS**: Allow Firebase Hosting origin only in production; allow localhost in development
-
-**Rate Limiting**
-
-* **MVP**: Per-IP rate limiting (10 requests per minute)
-* **Response**: `429 Too Many Requests` with `Retry-After` header when limit exceeded
-* **Implementation**: In-memory Map per function instance (distributed rate limiting deferred to v1.1)
+**Summary**:
+* **Endpoint**: `POST /api/v1/compute`
+* **Request**: `drug_input`, `sig`, `days_supply`, optional `preferred_ndcs` and `quantity_unit_override`
+* **Response**: Structured JSON with `rxnorm`, `computed`, `ndc_selection`, and `flags`
+* **Error Codes**: `validation_error`, `parse_error`, `dependency_failure`, `internal_error`, `rate_limit_exceeded`
+* **Authentication**: Optional API key (configurable per environment)
+* **Rate Limiting**: Per-IP (10 req/min) for MVP
 
 ---
 
-## 10) Data Model (Type Hints)
+## 10) Data Models
 
-```ts
-// types.ts
-export type ComputeRequest = {
-  drug_input: string;
-  sig: string;
-  days_supply: number;
-  preferred_ndcs?: string[];
-  quantity_unit_override?: 'tab'|'cap'|'mL'|'actuation'|'unit';
-};
+**Note**: Complete TypeScript type definitions for `ComputeRequest`, `ComputeResponse`, and `ErrorResponse` are documented in `docs/architecture.md` §4 (Data Models).
 
-export type ComputeResponse = {
-  rxnorm: { rxcui: string; name: string };
-  computed: { dose_unit: string; per_day: number; total_qty: number; days_supply: number };
-  ndc_selection: {
-    chosen?: { ndc: string; pkg_size: number; active: boolean; overfill: number; packs: number };
-    alternates: { ndc: string; pkg_size: number; active: boolean; overfill: number; packs: number }[];
-  };
-  flags: { inactive_ndcs: string[]; mismatch: boolean; notes?: string[]; error_code?: string | null };
-};
-
-export type ErrorResponse = {
-  error: string;
-  error_code: 'validation_error' | 'parse_error' | 'dependency_failure' | 'internal_error' | 'rate_limit_exceeded';
-  detail?: string;
-  retry_after_ms?: number;
-  field_errors?: Array<{ field: string; message: string }>;
-};
-```
+**Summary**:
+* **ComputeRequest**: Input payload with `drug_input`, `sig`, `days_supply`, and optional fields
+* **ComputeResponse**: Output payload with `rxnorm`, `computed`, `ndc_selection`, and `flags`
+* **ErrorResponse**: Standardized error format with `error_code`, `detail`, and optional `retry_after_ms`
 
 ---
 
-## 11) UX (Minimal UI)
+## 11) User Experience
 
-* Single form (Drug/NDC, SIG, Days’ supply) and **Calculate** button.
-* **Advanced Options** (collapsed): preferred NDCs, unit override, max overfill.
-* **Results Card**:
-  * Computed quantity (large, prominent)
-  * Chosen NDC (highlighted)
-  * Package size and pack count
-  * Overfill/underfill indicator (visual + text)
-* **Alternates List**: Collapsible list showing alternate NDCs with package size, packs, overfill %
-* **Flags Display**: Warning badges for inactive NDCs, error messages for mismatches, info notes for conversions
-* **Copy JSON Button**: Copy full JSON response to clipboard (accessible with ARIA label)
-* Toast warnings for inactive/mismatch.
+**Note**: Complete UI/UX specifications including component details, design system, accessibility requirements, and responsive design are documented in `docs/front-end-spec.md`.
 
-**Accessibility (WCAG 2.1 Level AA Compliance)**:
-* **Keyboard Navigation**: All interactive elements accessible via keyboard (Tab, Enter, Escape)
-* **Screen Reader Support**:
-  * Semantic HTML (`<form>`, `<button>`, `<label>`)
-  * ARIA labels for all interactive elements
-  * ARIA live regions for dynamic content (toast notifications)
-  * Proper heading hierarchy (h1 → h2 → h3)
-* **Color Contrast**: Text contrast ratio ≥ 4.5:1 (WCAG AA), interactive elements ≥ 3:1
-* **Focus Indicators**: Visible focus outline on all interactive elements, logical focus order
-* **Form Labels**: All form inputs have associated `<label>` elements, error messages via `aria-describedby`
-* **Error Handling**: Clear error messages in plain language, announced to screen readers
-* **Responsive Design**: Mobile-first, tablet-optimized (768px-1024px), desktop support
-  * **Tablet-Specific Requirements**: Explicit testing and optimization for tablet viewports (768px-1024px)
-  * **Touch Targets**: Minimum 44×44px for all interactive elements
-  * **Viewport Testing**: Test on iPad (Safari) and Android tablets
+**Summary**:
+* Single-page application with input form and results display
+* **Advanced Options** (collapsed): preferred NDCs, unit override, max overfill
+* **Results**: Quantity display, chosen NDC, alternates list, flags/warnings
+* **Accessibility**: WCAG 2.1 Level AA compliance required
+* **Responsive**: Mobile-first, tablet-optimized (768px-1024px), desktop support
 
 ---
 
@@ -308,199 +196,44 @@ export type ErrorResponse = {
 
 ---
 
-## 13) Telemetry & Logging
+## 13) Observability & Telemetry
 
-* **Metrics (API)**: p50/p95 latency, error rate, parse‑fail rate, inactive‑only rate, overfill occurrences, selected‑pack count.
-* **Sampling**: 10% in prod; 100% in staging.
-* **Retention**: ≤30 days; no PHI; redact inputs.
-* **Alert Thresholds**:
-  * **Uptime**: Alert if error rate > 5% over 5 minutes
-  * **Latency**: Alert if p95 > 3 seconds over 5 minutes
-  * **Implementation**: Cloud Monitoring default alerts (no custom dashboard for MVP)
-* **Structured Log Format**: JSON schema for all log entries:
-  ```json
-  {
-    "timestamp": "ISO 8601",
-    "level": "info" | "warn" | "error",
-    "event_type": "compute_request" | "api_call" | "error",
-    "metrics": { "latency_ms": 1234, "error_rate": 0.02 },
-    "context": { "drug_input_redacted": true, "sig_redacted": true }
-  }
-  ```
-* **Log Redaction Rules**:
-  * Redact `drug_input` and `sig` from logs (replace with `[REDACTED]` or boolean flag)
-  * Keep `days_supply`, `error_code`, `rxcui`, `ndc` (not PHI)
-  * Never log full request/response bodies containing SIG text
-* **Firebase implementation**:
+**Note**: Detailed telemetry, logging, and monitoring specifications are documented in `docs/architecture.md` §16 (Monitoring and Observability).
 
-  * **Cloud Functions logs**: structured JSON via `console.log` for metrics; export to Cloud Logging.
-  * **Alerts**: uptime check + error‑rate threshold in Cloud Monitoring.
-  * **UI analytics**: optional `gtag` for page view and compute events (no PHI).
+**Summary**:
+* **Required Metrics**: p50/p95 latency, error rate, parse-fail rate, inactive-only rate, overfill occurrences, selected-pack count
+* **Sampling**: 10% in production, 100% in staging
+* **Retention**: ≤30 days, no PHI, redact `drug_input` and `sig` from logs
+* **Alert Thresholds**: Error rate >5% over 5 minutes, p95 latency >3 seconds over 5 minutes
+* **Implementation**: Cloud Logging (structured JSON) and Cloud Monitoring (default alerts)
 
 ---
 
 ## 14) Security & Compliance
 
-* No persistent PHI; best‑effort redaction of free‑text SIG.
-* HTTPS/TLS everywhere; secrets via env vars.
-* Access: API key or JWT (MVP: static key).
+**Note**: Detailed security requirements including input validation, authentication, secrets management, and data protection are documented in `docs/architecture.md` §13 (Security).
+
+**Summary**:
+* No persistent PHI; redact `drug_input` and `sig` from logs
+* HTTPS/TLS everywhere; secrets via Firebase Secret Manager
+* Optional API key authentication (configurable per environment)
+* HIPAA boundary assumptions: compute-only, no storage
 
 ---
 
-## 15) Architecture & Stack
+## 15) Technical Architecture
 
-* **Frontend**: SvelteKit SPA (static build) served via **Firebase Hosting**.
-* **Backend API**: **Firebase Cloud Functions (v2, Node 20)** exposing `POST /api/v1/compute`.
-* **Build Tool**: **Vite** (default with SvelteKit) - fast dev server, optimized production builds using Rollup
-* **Build**: `@sveltejs/adapter-static` for SvelteKit; Axios/Zod for data/validation.
-* **Runtime**: Node.js 20, TypeScript (latest stable)
-* **Security**: HTTPS via Firebase; per‑env API key for `/api/*` if needed.
-* **CI/CD**: Manual deploy via `firebase deploy` for MVP (automation in v1.1).
+**Note**: Complete technical architecture including technology stack, system design, components, deployment strategy, and implementation details are documented in `docs/architecture.md`.
 
-### 15.1 External API Integration
-
-* **Execution**: Parallel calls to RxNorm and FDA APIs (no dependencies)
-* **Error Handling**: Graceful degradation with clear flagging
-  * If RxNorm fails but FDA succeeds → proceed with FDA data, flag `mismatch=true`
-  * If both fail → return `424` with `error_code: "dependency_failure"` and `retry_after_ms: 5000`
-* **Retry Logic**: Max 1 retry (per §18), exponential backoff (1000ms, 2000ms max)
-  * Retry only on: 5xx errors, 429 (rate limit), network timeouts
-  * Do NOT retry: 4xx errors (except 429), 404 (not found)
-* **Timeouts**: Upstream timeouts 5s, Cloud Function total budget 10s
-
-### 15.2 Caching Strategy (MVP)
-
-* **In-Memory Only** (no Firestore for MVP)
-* **Implementation**: LRU cache per function instance
-* **TTL**: 1 hour for RxNorm, 24 hours for FDA
-* **Size**: 1000 entries max per instance
-* **Degraded Mode**: Allow cached data up to 48 hours old when upstream is down (flag `stale_data=true`)
-
-### 15.3 Multi-Pack Selection Algorithm
-
-* **Strategy**: Greedy algorithm with pre-filtering
-* **Phase 1**: Pre-filter NDCs by active status
-* **Phase 2**: For each NDC, try 1-pack, 2-pack, 3-pack combinations
-* **Phase 3**: Score and sort (exact match > minimal overfill > fewer packs)
-* **Complexity**: O(n * m) where n = NDCs, m = MAX_PACKS (3)
-* **MVP Simplification**: Single-NDC multi-pack only (30×2, not 30×1 + 60×1)
-* **Mixed-NDC Multi-Pack**: Defer to v1.1
-
-### 15.4 Project Scaffolding
-
-```bash
-npm create svelte@latest ndc-qty && cd ndc-qty
-npm i && npm i -D @types/node
-npm i zod axios openai
-npm i -D @sveltejs/adapter-static
-npm i lru-cache
-```
-
-**Svelte config** (`svelte.config.js`)
-
-```js
-import adapter from '@sveltejs/adapter-static';
-export default { kit: { adapter: adapter() } };
-```
-
-**Firebase setup**
-
-```bash
-firebase init hosting functions   # Hosting (build/), Functions (Node 20, TypeScript)
-```
-
-**Cloud Function (v2) skeleton** (`functions/src/index.ts`)
-
-```ts
-import { onRequest } from 'firebase-functions/v2/https';
-import { defineSecret } from 'firebase-functions/params';
-import cors from 'cors';
-
-const CORS = cors({ 
-  origin: process.env.NODE_ENV === 'production' 
-    ? [`https://${process.env.GCLOUD_PROJECT}.web.app`]
-    : true 
-});
-
-const openaiApiKey = defineSecret('OPENAI_API_KEY');
-const apiKey = defineSecret('API_KEY');
-
-export const compute = onRequest(
-  { 
-    region: 'us-central1',
-    secrets: [openaiApiKey, apiKey]
-  },
-  (req, res) => {
-    CORS(req, res, async () => {
-      if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-      try {
-        // TODO: parse body, call RxNorm + FDA, run selection logic
-        // const result: ComputeResponse = await computeHandler(req.body)
-        res.json({ ok: true /* ...result */ });
-      } catch (e: any) {
-        res.status(500).json({ error: e?.message || 'Internal Error', error_code: 'internal_error' });
-      }
-    });
-  }
-);
-```
-
-**Hosting config** (`firebase.json`)
-
-```json
-{
-  "hosting": {
-    "public": "build",
-    "ignore": ["**/.*", "**/node_modules/**"],
-    "rewrites": [
-      { "source": "/api/v1/compute", "function": "compute" },
-      { "source": "**", "destination": "/index.html" }
-    ]
-  }
-}
-```
-
-**Build & Deploy**
-
-```bash
-npm run build            # produces /build for Hosting
-firebase deploy          # deploys Hosting + Functions
-```
-
-### 15.5 Secrets Management
-
-* **Use Firebase Secret Manager** (not Functions config for secrets)
-* **Required Secrets**:
-  * `OPENAI_API_KEY` (for AI fallback)
-  * `API_KEY` (for API authentication, if needed)
-
-**Setting Secrets:**
-
-```bash
-firebase functions:secrets:set OPENAI_API_KEY
-firebase functions:secrets:set API_KEY
-```
-
-**Access in Code:**
-
-```ts
-import { defineSecret } from 'firebase-functions/params';
-const openaiApiKey = defineSecret('OPENAI_API_KEY');
-// Access via openaiApiKey.value()
-```
-
-### 15.6 Environment Separation
-
-* **MVP**: Two environments (dev, prod)
-* **Dev**: `{project-id}-dev` Firebase project
-* **Prod**: `{project-id}` Firebase project
-* **v1.1**: Add staging if needed
-
-### 15.7 Local Development
-
-* **Emulators**: Firebase emulators for Hosting + Functions
-* **Mock APIs**: Simple Express server for RxNorm/FDA during development
-* **Testing**: Unit tests (core algorithms), integration tests (API endpoint with emulators)
+**Summary**:
+* **Architecture**: Serverless (Jamstack) - SvelteKit frontend + Firebase Cloud Functions v2 backend
+* **Platform**: Firebase (Hosting + Functions + Secret Manager)
+* **Key Technical Decisions**:
+  * Parallel execution of RxNorm and FDA API calls
+  * In-memory LRU caching (no database for MVP)
+  * Hybrid SIG parsing (rules-based with AI fallback)
+  * Degraded mode with stale cache support (48 hours max)
+  * Manual deployment for MVP (CI/CD automation deferred to v1.1)
 
 ---
 
@@ -754,21 +487,21 @@ const openaiApiKey = defineSecret('OPENAI_API_KEY');
 
 ## 20) Appendix
 
-* **Config** (defaults):
+### 20.1 Configuration Defaults
 
-  * `OVERFILL_MAX = 10%`
-  * `MAX_PACKS = 3`
-  * `DEFAULT_INHALER_ACTUATIONS = 200`
-  * `INSULIN_CONCENTRATION = { U100: 100 }`
-  * **Timeouts:** upstream 5s, Cloud Function total budget 10s, 1 retry on upstream.
-* **Secrets Management**
+* `OVERFILL_MAX = 10%` - Maximum allowed overfill percentage
+* `MAX_PACKS = 3` - Maximum number of packages in multi-pack combinations
+* `DEFAULT_INHALER_ACTUATIONS = 200` - Default actuations per inhaler canister
+* `INSULIN_CONCENTRATION = { U100: 100 }` - Insulin concentration mapping
 
-  * Use Firebase Secret Manager (not Functions config)
-  * Required secrets: `OPENAI_API_KEY`, `API_KEY`
-  * Set via: `firebase functions:secrets:set <SECRET_NAME>`
-* **Local Dev**
+**Note**: Implementation details for timeouts, retry logic, and caching are documented in `docs/architecture.md`.
 
-  * Use `firebase emulators:start` for Hosting + Functions; point UI to `/api/v1/compute` via Hosting rewrite, or direct emulator URL `http://localhost:5001/<project>/us-central1/compute`.
-* **Future**
+### 20.2 Future Enhancements
 
-  * Preferred NDC biasing; formulary awareness; AI SIG assist; UI theming.
+* Preferred NDC biasing
+* Formulary awareness
+* Enhanced AI SIG assist
+* UI theming
+* CI/CD automation
+* Distributed rate limiting
+* Mixed-NDC multi-pack combinations

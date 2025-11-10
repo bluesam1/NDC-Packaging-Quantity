@@ -1,0 +1,25 @@
+{
+  "ndcSearch": {
+    "results": [
+      {
+        "product_ndc": "00000-1111-22",
+        "package_ndc": "00000-1111-22",
+        "package_description": "30 CAPSULE in 1 BOTTLE",
+        "marketing_status": "Active",
+        "marketing_start_date": "20200101"
+      }
+    ]
+  },
+  "brandSearch": {
+    "results": [
+      {
+        "product_ndc": "00000-1111-22",
+        "package_ndc": "00000-1111-22",
+        "package_description": "30 CAPSULE in 1 BOTTLE",
+        "marketing_status": "Active",
+        "brand_name": "Mock Brand"
+      }
+    ]
+  }
+}
+

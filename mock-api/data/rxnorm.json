@@ -1,0 +1,25 @@
+{
+  "findRxcuiByString": {
+    "idGroup": {
+      "rxnormId": ["12345"],
+      "name": "mock drug"
+    }
+  },
+  "rxcuiNdcs": {
+    "ndcGroup": {
+      "ndc": ["00000-1111-22", "00000-3333-44", "00000-5555-66"]
+    }
+  },
+  "approximateTerm": {
+    "approximateGroup": {
+      "candidate": [
+        {
+          "rxcui": "12345",
+          "score": "100",
+          "name": "mock drug"
+        }
+      ]
+    }
+  }
+}
+
