@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { Button } from '$lib/components';
 	import { showToast } from '$lib/stores/toast';
 	
 	interface CopyJsonButtonProps {
@@ -42,27 +41,47 @@
 	}
 </script>
 
-<Button
-	variant="secondary"
+<button
 	onclick={handleCopy}
-	ariaLabel="Copy JSON response to clipboard"
+	aria-label="Copy JSON response to clipboard"
 	class="copy-json-button {className}"
+	title="Copy JSON response"
 	{...restProps}
 >
-	{copied ? '✓ Copied!' : '📋 Copy JSON Response'}
-</Button>
+	{copied ? '✓' : '📋'}
+</button>
 
 <style>
 	.copy-json-button {
-		width: 100%;
-		margin-top: var(--space-4);
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background-color: var(--gray-200);
+		border: 1px solid var(--gray-300);
+		border-radius: var(--border-radius-md);
+		cursor: pointer;
+		color: var(--text-secondary);
+		font-size: var(--text-base);
+		transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+		padding: 0;
+		flex-shrink: 0;
 	}
-	
-	@media (min-width: 640px) {
-		.copy-json-button {
-			width: auto;
-			min-width: 200px;
-		}
+
+	.copy-json-button:hover {
+		background-color: var(--gray-300);
+		color: var(--text-primary);
+		border-color: var(--gray-400);
+	}
+
+	.copy-json-button:active {
+		background-color: var(--gray-400);
+	}
+
+	.copy-json-button:focus-visible {
+		outline: 2px solid var(--primary-500);
+		outline-offset: 2px;
 	}
 </style>
 

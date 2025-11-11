@@ -73,7 +73,7 @@
 			<div id="alternates-list-content" class="alternates-list__content">
 				{#each alternates as alternate (alternate.ndc)}
 					<div
-						aria-label="Alternate package: NDC {alternate.ndc}, {alternate.pkg_size} per package, {alternate.packs} pack(s), {alternate.overfill.toFixed(1)}% overfill"
+						aria-label="Alternate package: NDC {alternate.ndc}, {alternate.pkg_size} per package, {alternate.packs} pack(s), {(alternate.overfill * 100).toFixed(1)}% overfill"
 					>
 					<AlternatePackage
 						ndc={alternate.ndc}

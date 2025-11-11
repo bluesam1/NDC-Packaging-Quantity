@@ -120,6 +120,15 @@ describe('SIG Parser', () => {
         });
       });
 
+      it('should parse "2 puffs BID" format', () => {
+        const result = parseWithRules('2 puffs BID');
+        expect(result).toEqual({
+          dose_unit: 'actuation',
+          per_day: 4, // 2 puffs × 2/day = 4 actuations
+          confidence: 'parsed',
+        });
+      });
+
       it('should parse actuations format', () => {
         const result = parseWithRules('Use 1 actuation three times daily');
         expect(result).toEqual({

@@ -139,3 +139,66 @@ export function detectDosageForm(
   return 'solid';
 }
 
+/**
+ * Detect dosage form with metadata for reasoning
+ */
+export interface DosageFormDetectionResult {
+  detected: DosageFormType;
+  method: string;
+  matched_keywords?: string[];
+}
+
+export function detectDosageFormWithMetadata(
+  drugName: string,
+  ndcs: NDCPackageData[],
+  doseUnit: string
+): DosageFormDetectionResult {
+  const normalizedName = drugName.toLowerCase().trim();
+  const normalizedUnit = doseUnit.toLowerCase().trim();
+
+  // Check dose unit first (most reliable)
+  if (normalizedUnit === 'actuation') {
+    return { detected: 'inhaler', method: 'from_dose_unit' };
+  }
+
+  if (normalizedUnit === 'unit') {
+    // Check if it's insulin
+    const matchedInsulinKeywords = INSULIN_KEYWORDS.filter(keyword => normalizedName.includes(keyword));
+    if (matchedInsulinKeywords.length > 0) {
+      return { detected: 'insulin', method: 'from_dose_unit_and_drug_name', matched_keywords: matchedInsulinKeywords };
+    }
+  }
+
+  if (normalizedUnit === 'ml') {
+    return { detected: 'liquid', method: 'from_dose_unit' };
+  }
+
+  // Check drug name for inhaler keywords
+  const matchedInhalerKeywords = INHALER_KEYWORDS.filter(keyword => normalizedName.includes(keyword));
+  if (matchedInhalerKeywords.length > 0) {
+    return { detected: 'inhaler', method: 'from_drug_name', matched_keywords: matchedInhalerKeywords };
+  }
+
+  // Check drug name for insulin keywords
+  const matchedInsulinKeywords = INSULIN_KEYWORDS.filter(keyword => normalizedName.includes(keyword));
+  if (matchedInsulinKeywords.length > 0) {
+    return { detected: 'insulin', method: 'from_drug_name', matched_keywords: matchedInsulinKeywords };
+  }
+
+  // Check FDA dosage forms
+  const dosageForms = ndcs
+    .map(ndc => ndc.dosage_form?.toUpperCase())
+    .filter(Boolean);
+
+  if (dosageForms.some(form => INHALER_DOSAGE_FORMS.includes(form!))) {
+    return { detected: 'inhaler', method: 'from_fda_data' };
+  }
+
+  if (dosageForms.some(form => LIQUID_DOSAGE_FORMS.includes(form!))) {
+    return { detected: 'liquid', method: 'from_fda_data' };
+  }
+
+  // Default to solid (tablets/capsules)
+  return { detected: 'solid', method: 'default' };
+}
+

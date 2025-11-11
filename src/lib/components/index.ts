@@ -13,4 +13,11 @@ export { default as FlagsSection } from './FlagsSection.svelte';
 export { default as CopyJsonButton } from './CopyJsonButton.svelte';
 export { default as Toast } from './Toast.svelte';
 export { default as ToastContainer } from './ToastContainer.svelte';
+export { default as TestMenuButton } from './TestMenuButton.svelte';
+export { default as TestSuitePanel } from './TestSuitePanel.svelte';
+export { default as TestLogEntry } from './TestLogEntry.svelte';
+export { default as TestResults } from './TestResults.svelte';
+export { default as ReasoningSection } from './ReasoningSection.svelte';
+export { default as Header } from './Header.svelte';
+export { default as ImageUpload } from './ImageUpload.svelte';
 

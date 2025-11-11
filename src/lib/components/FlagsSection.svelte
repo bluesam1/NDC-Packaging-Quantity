@@ -29,10 +29,26 @@
 		inactiveNdcsExpanded = !inactiveNdcsExpanded;
 	}
 	
+	// Separate critical warnings from regular notes
+	let criticalWarnings = $derived(
+		flags.notes?.filter(note => 
+			note.includes('No active NDCs available') || 
+			note.includes('No suitable package found')
+		) || []
+	);
+	
+	let regularNotes = $derived(
+		flags.notes?.filter(note => 
+			!note.includes('No active NDCs available') && 
+			!note.includes('No suitable package found')
+		) || []
+	);
+
 	let hasFlags = $derived(
 		(flags.inactive_ndcs && flags.inactive_ndcs.length > 0) ||
 		flags.mismatch === true ||
-		(flags.notes && flags.notes.length > 0)
+		criticalWarnings.length > 0 ||
+		regularNotes.length > 0
 	);
 </script>
 
@@ -44,6 +60,7 @@
 			{#if flags.inactive_ndcs && flags.inactive_ndcs.length > 0}
 				<div class="flags-section__flag" role="alert">
 					<button 
+						type="button"
 						class="flags-section__toggle"
 						onclick={toggleInactiveNdcs}
 						aria-expanded={inactiveNdcsExpanded}
@@ -82,19 +99,29 @@
 				</p>
 			</div>
 		{/if}
-			
-			{#if flags.notes && flags.notes.length > 0}
-				<div class="flags-section__flag">
-					<Badge variant="info" ariaLabel="Info: Conversion notes">
-						ℹ️ Conversion Notes
+		
+		{#if criticalWarnings.length > 0}
+			{#each criticalWarnings as warning}
+				<div class="flags-section__flag flags-section__flag--error" role="alert">
+					<Badge variant="error" ariaLabel="Error: Critical warning">
+						❌ {warning}
 					</Badge>
-					<ul class="flags-section__list" aria-label="List of conversion notes">
-						{#each flags.notes as note}
-							<li class="flags-section__list-item">{note}</li>
-						{/each}
-					</ul>
 				</div>
-			{/if}
+			{/each}
+		{/if}
+			
+		{#if regularNotes.length > 0}
+			<div class="flags-section__flag">
+				<Badge variant="info" ariaLabel="Info: Notes">
+					ℹ️ Notes
+				</Badge>
+				<ul class="flags-section__list" aria-label="List of notes">
+					{#each regularNotes as note}
+						<li class="flags-section__list-item">{note}</li>
+					{/each}
+				</ul>
+			</div>
+		{/if}
 		</div>
 	</div>
 {/if}
@@ -121,20 +148,33 @@
 		gap: var(--space-2);
 		background: none;
 		border: none;
-		padding: 0;
+		padding: var(--space-2);
 		cursor: pointer;
 		width: 100%;
 		text-align: left;
+		transition: background-color 150ms ease;
 	}
 	
 	.flags-section__toggle:hover {
-		opacity: 0.8;
+		background-color: var(--gray-50);
+		border-radius: var(--border-radius-sm);
+	}
+	
+	.flags-section__toggle:focus-visible {
+		outline: 2px solid var(--primary-500);
+		outline-offset: 2px;
+		border-radius: var(--border-radius-sm);
 	}
 	
 	.flags-section__toggle-icon {
 		margin-left: auto;
 		font-size: var(--text-xs);
 		color: var(--text-tertiary);
+		pointer-events: none;
+	}
+	
+	.flags-section__toggle :global(.badge) {
+		pointer-events: none;
 	}
 	
 	.flags-section__content {
@@ -147,6 +187,14 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
+	}
+	
+	.flags-section__flag--error {
+		background-color: var(--error-50);
+		padding: var(--space-3);
+		border-radius: var(--border-radius-md);
+		border-left: 3px solid var(--error-500);
+		margin-top: var(--space-2);
 	}
 	
 	.flags-section__message {

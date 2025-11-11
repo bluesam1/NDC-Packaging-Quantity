@@ -7,6 +7,7 @@
 import type { ComputeRequest, ComputeResponse, ErrorResponse, ErrorCode } from '$lib/types/api';
 
 const REQUEST_TIMEOUT_MS = 10000; // 10 seconds
+const OCR_REQUEST_TIMEOUT_MS = 60000; // 60 seconds for OCR (image processing can take longer)
 const MAX_RETRIES = 1;
 
 /**
@@ -178,5 +179,101 @@ export async function computeQuantity(
  */
 export function getErrorMessage(error: ApiError): string {
 	return ERROR_MESSAGES[error.errorCode] || error.detail || error.message;
+}
+
+/**
+ * Extract prescription data from image using OCR
+ * 
+ * @param imageFile - Image file to extract data from
+ * @returns Promise resolving to extracted prescription data with field detection metadata
+ * @throws ApiError if request fails
+ */
+export async function extractPrescriptionFromImage(
+	imageFile: File
+): Promise<{
+	data: Partial<ComputeRequest>;
+	fields_found: string[];
+}> {
+	const apiUrl = getApiUrl();
+	const isFunctionsEmulator = apiUrl.includes(':5001');
+	const endpoint = isFunctionsEmulator 
+		? `${apiUrl}/extractPrescription` 
+		: `${apiUrl}/api/v1/extract-prescription`;
+	
+	// Use longer timeout for OCR requests
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), OCR_REQUEST_TIMEOUT_MS);
+	
+	try {
+		// Convert file to base64
+		const base64 = await new Promise<string>((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const result = reader.result as string;
+				resolve(result);
+			};
+			reader.onerror = reject;
+			reader.readAsDataURL(imageFile);
+		});
+
+		const response = await fetch(endpoint, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ image: base64 }),
+			signal: controller.signal,
+		});
+		
+		clearTimeout(timeoutId);
+		
+		if (!response.ok) {
+			const errorResponse = await parseErrorResponse(response);
+			
+			throw new ApiError(
+				response.status,
+				errorResponse.error_code,
+				errorResponse.detail || errorResponse.error,
+				errorResponse.retry_after_ms,
+				errorResponse.field_errors
+			);
+		}
+		
+		const data = await response.json();
+		return data as {
+			data: Partial<ComputeRequest>;
+			fields_found: string[];
+		};
+	} catch (error) {
+		clearTimeout(timeoutId);
+		if (error instanceof ApiError) {
+			throw error;
+		}
+		
+		if (error instanceof Error && error.name === 'AbortError') {
+			throw new ApiError(
+				408,
+				'internal_error',
+				'Request timed out. Please try again.',
+				undefined
+			);
+		}
+		
+		if (error instanceof TypeError && error.message.includes('fetch')) {
+			throw new ApiError(
+				0,
+				'dependency_failure',
+				'Network error. Please check your connection and try again.',
+				undefined
+			);
+		}
+		
+		throw new ApiError(
+			500,
+			'internal_error',
+			error instanceof Error ? error.message : 'An unexpected error occurred',
+			undefined
+		);
+	}
 }
 

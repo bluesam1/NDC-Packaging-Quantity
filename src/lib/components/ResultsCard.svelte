@@ -4,39 +4,9 @@
 	import SelectedPackage from './SelectedPackage.svelte';
 	import AlternatesList from './AlternatesList.svelte';
 	import FlagsSection from './FlagsSection.svelte';
+	import ReasoningSection from './ReasoningSection.svelte';
 	import CopyJsonButton from './CopyJsonButton.svelte';
-	
-	// Import type from backend
-	export type ComputeResponse = {
-		rxnorm: { rxcui: string; name: string };
-		computed: { dose_unit: string; per_day: number; total_qty: number; days_supply: number };
-		ndc_selection: {
-			chosen?: {
-				ndc: string;
-				pkg_size: number;
-				active: boolean;
-				overfill: number;
-				packs: number;
-				brand_name?: string;
-				dosage_form?: string;
-			};
-			alternates: Array<{
-				ndc: string;
-				pkg_size: number;
-				active: boolean;
-				overfill: number;
-				packs: number;
-				brand_name?: string;
-				dosage_form?: string;
-			}>;
-		};
-		flags: {
-			inactive_ndcs: string[];
-			mismatch: boolean;
-			notes?: string[];
-			error_code?: string | null;
-		};
-	};
+	import type { ComputeResponse } from '$lib/types/api';
 	
 	interface ResultsCardProps {
 		results?: ComputeResponse | null;
@@ -82,10 +52,24 @@
 	);
 	let hasError = $derived(error !== null);
 	let isEmpty = $derived(!hasResults && !loading && !hasError);
+	
+	// Debug: Log reasoning data
+	$effect(() => {
+		if (results?.reasoning) {
+			console.log('Reasoning data found:', results.reasoning);
+		} else if (results) {
+			console.log('Results found but no reasoning:', results);
+		}
+	});
 </script>
 
 <Card class="results-card {className}" {...restProps}>
-	<h2 class="results-card__title">Results</h2>
+	<div class="results-card__header">
+		<h2 class="results-card__title">Results</h2>
+		{#if hasResults && results}
+			<CopyJsonButton jsonData={results} onCopy={onCopyJson} />
+		{/if}
+	</div>
 	
 	<div class="results-card__content" aria-live="polite" aria-busy={loading}>
 		{#if loading}
@@ -111,12 +95,25 @@
 				<p class="results-card__empty-text">Enter drug information above and click Calculate</p>
 			</div>
 	{:else if hasResults && results}
-		{#if results.rxnorm.name}
+		{#if results.rxnorm.name || results.ndc_selection.chosen}
 			<div class="results-card__drug-name">
-				<h3 class="results-card__drug-name-text">{results.rxnorm.name}</h3>
-				{#if results.rxnorm.rxcui}
-					<code class="results-card__rxcui">RxCUI: {results.rxnorm.rxcui}</code>
+				{#if results.rxnorm.name}
+					<h3 class="results-card__drug-name-text">{results.rxnorm.name}</h3>
 				{/if}
+				<div class="results-card__identifiers">
+					{#if results.rxnorm.rxcui}
+						<code class="results-card__identifier">RxCUI: {results.rxnorm.rxcui}</code>
+					{/if}
+					{#if results.ndc_selection.chosen}
+						<code 
+							class="results-card__identifier results-card__ndc"
+							onclick={() => handleCopyNdc(results.ndc_selection.chosen!.ndc)}
+							title="Click to copy NDC"
+						>
+							NDC: {formatNDC(results.ndc_selection.chosen.ndc)}
+						</code>
+					{/if}
+				</div>
 			</div>
 		{/if}
 		
@@ -148,10 +145,10 @@
 		{#if results.flags}
 			<FlagsSection flags={results.flags} />
 		{/if}
-			
-			{#if results}
-				<CopyJsonButton jsonData={results} onCopy={onCopyJson} />
-			{/if}
+		
+		{#if results.reasoning}
+			<ReasoningSection reasoning={results.reasoning} />
+		{/if}
 		{/if}
 	</div>
 </Card>
@@ -159,17 +156,28 @@
 <style>
 	.results-card {
 		width: 100%;
+		position: relative;
 	}
 	
+	.results-card__header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: var(--space-6);
+		gap: var(--space-4);
+	}
+
 	.results-card__title {
 		font-size: var(--text-2xl);
 		font-weight: var(--font-semibold);
 		color: var(--text-primary);
-		margin-bottom: var(--space-6);
+		margin: 0;
+		flex: 1;
 	}
 	
 	.results-card__content {
 		min-height: 200px;
+		position: relative;
 	}
 	
 	.results-card__loading {
@@ -262,14 +270,34 @@
 		text-transform: capitalize;
 	}
 	
-	.results-card__rxcui {
+	.results-card__identifiers {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+		align-items: center;
+	}
+
+	.results-card__identifier {
 		font-family: monospace;
 		font-size: var(--text-sm);
 		color: var(--text-tertiary);
 		background-color: var(--gray-100);
 		padding: var(--space-1) var(--space-2);
 		border-radius: var(--border-radius-sm);
-		align-self: flex-start;
+	}
+
+	.results-card__ndc {
+		cursor: pointer;
+		transition: background-color 150ms ease, color 150ms ease;
+	}
+
+	.results-card__ndc:hover {
+		background-color: var(--gray-200);
+		color: var(--text-secondary);
+	}
+
+	.results-card__ndc:active {
+		background-color: var(--gray-300);
 	}
 </style>
 

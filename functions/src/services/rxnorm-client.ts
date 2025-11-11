@@ -448,10 +448,18 @@ export class RxNormClient {
 
 /**
  * Create a default RxNorm client instance
+ * Uses real APIs by default unless USE_MOCK_APIS=true is set
  */
 export function createRxNormClient(): RxNormClient {
+  const useMockApis = process.env.USE_MOCK_APIS === 'true';
+  
+  // Determine base URL: use mock if USE_MOCK_APIS=true, otherwise use real API
+  const baseUrl = useMockApis
+    ? (process.env.MOCK_RXNORM_URL || 'http://localhost:3001')
+    : (process.env.RXNORM_API_URL || 'https://rxnav.nlm.nih.gov/REST/');
+  
   return new RxNormClient({
-    baseUrl: process.env.RXNORM_API_URL || 'https://rxnav.nlm.nih.gov/REST/',
+    baseUrl,
     timeout: 5000,
     maxRetries: 1,
     cacheTTL: 3600000, // 1 hour

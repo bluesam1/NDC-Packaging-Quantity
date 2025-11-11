@@ -35,8 +35,10 @@
 	}
 	
 	function getOverfillColor(overfill: number): 'success' | 'warning' | 'error' {
-		if (overfill === 0) return 'success';
-		if (overfill > 10) return 'error';
+		// overfill is a decimal (0.0227 = 2.27%), convert to percentage for comparison
+		const overfillPercent = overfill * 100;
+		if (overfillPercent === 0) return 'success';
+		if (overfillPercent > 10) return 'error';
 		return 'warning';
 	}
 	
@@ -100,7 +102,7 @@
 		<div class="alternate-package__detail">
 			<span class="alternate-package__detail-label">Overfill:</span>
 			<span class="alternate-package__detail-value alternate-package__overfill--{getOverfillColor(overfillPct)}">
-				{overfillPct.toFixed(1)}%
+				{(overfillPct * 100).toFixed(1)}%
 			</span>
 		</div>
 	</div>

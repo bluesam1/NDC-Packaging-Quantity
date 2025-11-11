@@ -23,6 +23,18 @@ export interface ParsedSIG {
 }
 
 /**
+ * SIG parsing result with metadata for reasoning
+ */
+export interface ParsedSIGWithMetadata {
+  parsed: ParsedSIG | null;
+  method: 'rules' | 'ai' | 'failed';
+  sub_method?: 'time-based' | 'frequency-based'; // Sub-method for rules-based parsing
+  quantity_per_dose?: number;
+  frequency?: number;
+  unit_conversion?: { from: string; to: string; original: number; converted: number };
+}
+
+/**
  * Frequency mapping for common abbreviations and spellings
  */
 const FREQUENCY_MAP: Record<string, number> = {
@@ -32,6 +44,10 @@ const FREQUENCY_MAP: Record<string, number> = {
   'q d': 1,
   'once daily': 1,
   'once a day': 1,
+  'once per day': 1,
+  'each morning': 1,
+  'every morning': 1,
+  'in the morning': 1,
   '1x daily': 1,
   '1x/day': 1,
   '1 x daily': 1,
@@ -161,11 +177,14 @@ function extractQuantityPerDose(sig: string): { quantity: number; unit: string |
     /\b(\d+\.?\d*)\s+(tablet|tablets|tab|tabs|capsule|capsules|cap|caps|ml|milliliter|milliliters|teaspoon|teaspoons|tsp|tablespoon|tablespoons|tbsp|oz|ounce|ounces|puff|puffs|actuation|actuations|inhalation|inhalations|spray|sprays|unit|units)\b/i,
   ];
 
-  for (const pattern of quantityPatterns) {
+  for (let i = 0; i < quantityPatterns.length; i++) {
+    const pattern = quantityPatterns[i];
     const match = sig.match(pattern);
     if (match) {
-      const quantity = parseFloat(match[2] || match[1]);
-      const unit = match[3] || match[2];
+      // Pattern 1 (with verb): match[1]=verb, match[2]=quantity, match[3]=unit
+      // Pattern 2 (without verb): match[1]=quantity, match[2]=unit
+      const quantity = i === 0 ? parseFloat(match[2]) : parseFloat(match[1]);
+      const unit = i === 0 ? match[3] : match[2];
       if (quantity > 0 && quantity <= 100) {
         return { quantity, unit };
       }
@@ -208,6 +227,96 @@ function extractDoseUnit(sig: string, unitOverride?: string): string | null {
 }
 
 /**
+ * Detect and parse time-based dosing patterns (e.g., "1 in morning and 2 in evening")
+ * 
+ * @param sig - Prescription SIG text
+ * @returns ParsedSIG or null if not a time-based pattern
+ */
+function parseTimeBasedDosing(sig: string, unitOverride?: string): ParsedSIG | null {
+  const normalizedSig = sig.toLowerCase().trim();
+  
+  // Time-based keywords that indicate we should SUM quantities, not multiply
+  const timeKeywords = [
+    /\b(in the morning|in the evening|at morning|at evening|morning|evening|at bedtime|at night|bedtime)\b/i,
+    /\b(at \d{1,2}(:\d{2})?\s*(am|pm|AM|PM))\b/i,
+    /\b(with breakfast|with lunch|with dinner|with meals)\b/i,
+  ];
+  
+  // Check if SIG contains time-based keywords
+  const hasTimeKeywords = timeKeywords.some(pattern => pattern.test(normalizedSig));
+  
+  if (!hasTimeKeywords) {
+    return null; // Not a time-based pattern
+  }
+  
+  // Pattern to extract all quantity + unit pairs
+  // Matches: "1 capsule", "2 tablets", "5 mL", etc.
+  const quantityPattern = /\b(\d+\.?\d*)\s+(tablet|tablets|tab|tabs|capsule|capsules|cap|caps|ml|milliliter|milliliters|teaspoon|teaspoons|tsp|tablespoon|tablespoons|tbsp|oz|ounce|ounces|puff|puffs|actuation|actuations|inhalation|inhalations|spray|sprays|unit|units)\b/gi;
+  
+  const matches = Array.from(normalizedSig.matchAll(quantityPattern));
+  
+  if (matches.length < 2) {
+    // Need at least 2 quantities for time-based dosing
+    return null;
+  }
+  
+  // Extract all quantities and units
+  const quantities: Array<{ quantity: number; unit: string }> = [];
+  for (const match of matches) {
+    const quantity = parseFloat(match[1]);
+    const unit = match[2];
+    if (quantity > 0 && quantity <= 100) {
+      quantities.push({ quantity, unit });
+    }
+  }
+  
+  if (quantities.length < 2) {
+    return null;
+  }
+  
+  // Check if all units are the same (or can be normalized to same)
+  const firstUnit = normalizeUnit(quantities[0].unit);
+  if (!firstUnit) {
+    return null;
+  }
+  
+  // Verify all quantities use compatible units
+  for (const qty of quantities) {
+    const normalized = normalizeUnit(qty.unit);
+    if (!normalized || normalized !== firstUnit) {
+      // Units don't match - might not be time-based dosing
+      return null;
+    }
+  }
+  
+  // Sum all quantities
+  let totalPerDay = 0;
+  for (const qty of quantities) {
+    totalPerDay += qty.quantity;
+  }
+  
+  // Use unit override if provided, otherwise use the detected unit
+  const doseUnit = unitOverride ? normalizeUnit(unitOverride) || unitOverride : firstUnit;
+  
+  if (!doseUnit || totalPerDay <= 0 || totalPerDay > 100) {
+    return null;
+  }
+  
+  logInfo('Parsed time-based dosing pattern', {
+    sig: '[REDACTED]',
+    quantities: quantities.map(q => `${q.quantity} ${q.unit}`),
+    totalPerDay,
+    doseUnit,
+  });
+  
+  return {
+    dose_unit: doseUnit,
+    per_day: totalPerDay,
+    confidence: 'parsed',
+  };
+}
+
+/**
  * Parse SIG using rules-based approach
  * 
  * @param sig - Prescription SIG text
@@ -221,7 +330,13 @@ export function parseWithRules(sig: string, unitOverride?: string): ParsedSIG | 
 
   const normalizedSig = sig.trim();
 
-  // Extract components
+  // First, try to detect time-based dosing patterns
+  const timeBasedResult = parseTimeBasedDosing(normalizedSig, unitOverride);
+  if (timeBasedResult) {
+    return timeBasedResult;
+  }
+
+  // Extract components for frequency-based parsing
   const quantityData = extractQuantityPerDose(normalizedSig);
   const frequency = extractFrequency(normalizedSig);
   const doseUnit = extractDoseUnit(normalizedSig, unitOverride);
@@ -291,6 +406,89 @@ export function parseWithRules(sig: string, unitOverride?: string): ParsedSIG | 
 }
 
 /**
+ * Parse with rules and return metadata for reasoning
+ */
+export function parseWithRulesWithMetadata(sig: string, unitOverride?: string): ParsedSIGWithMetadata {
+  if (!sig || typeof sig !== 'string' || sig.trim().length === 0) {
+    return { parsed: null, method: 'failed' };
+  }
+
+  const normalizedSig = sig.trim();
+
+  // First, try to detect time-based dosing patterns
+  const timeBasedResult = parseTimeBasedDosing(normalizedSig, unitOverride);
+  if (timeBasedResult) {
+    // For time-based dosing, we don't have separate quantity_per_dose and frequency
+    // Estimate frequency as the number of dosing times
+    const quantityPattern = /\b(\d+\.?\d*)\s+(tablet|tablets|tab|tabs|capsule|capsules|cap|caps|ml|milliliter|milliliters|teaspoon|teaspoons|tsp|tablespoon|tablespoons|tbsp|oz|ounce|ounces|puff|puffs|actuation|actuations|inhalation|inhalations|spray|sprays|unit|units)\b/gi;
+    const matches = Array.from(normalizedSig.toLowerCase().matchAll(quantityPattern));
+    const estimatedFrequency = matches.length >= 2 ? matches.length : 2; // Default to 2 if we can't count
+    
+    return {
+      parsed: timeBasedResult,
+      method: 'rules',
+      sub_method: 'time-based',
+      quantity_per_dose: timeBasedResult.per_day / estimatedFrequency, // Approximate
+      frequency: estimatedFrequency,
+    };
+  }
+
+  // Extract components for frequency-based parsing
+  const quantityData = extractQuantityPerDose(normalizedSig);
+  const frequency = extractFrequency(normalizedSig);
+  const doseUnit = extractDoseUnit(normalizedSig, unitOverride);
+
+  // Validate required components
+  if (!frequency || !doseUnit || !quantityData) {
+    return { parsed: null, method: 'failed' };
+  }
+
+  let quantityPerDose = quantityData.quantity;
+  let unitConversion: { from: string; to: string; original: number; converted: number } | undefined;
+  
+  // Handle liquid unit conversions (e.g., teaspoons, tablespoons, oz to mL)
+  if (quantityData.unit && isLiquidUnit(quantityData.unit)) {
+    try {
+      // Convert to mL if it's a non-mL liquid unit
+      const normalizedQuantityUnit = quantityData.unit.toLowerCase().trim();
+      if (normalizedQuantityUnit !== 'ml' && normalizedQuantityUnit !== 'milliliter' && normalizedQuantityUnit !== 'milliliters') {
+        const converted = convertToML(quantityData.quantity, quantityData.unit);
+        unitConversion = {
+          from: quantityData.unit,
+          to: 'mL',
+          original: quantityData.quantity,
+          converted: converted,
+        };
+        quantityPerDose = converted;
+      }
+    } catch {
+      // Continue with original quantity if conversion fails
+    }
+  }
+
+  // Calculate per_day
+  const perDay = quantityPerDose * frequency;
+
+  // Validate per_day is reasonable
+  if (perDay <= 0 || perDay > 100) {
+    return { parsed: null, method: 'failed' };
+  }
+
+  return {
+    parsed: {
+      dose_unit: doseUnit,
+      per_day: perDay,
+      confidence: 'parsed',
+    },
+    method: 'rules',
+    sub_method: 'frequency-based',
+    quantity_per_dose: quantityPerDose,
+    frequency: frequency,
+    unit_conversion: unitConversion,
+  };
+}
+
+/**
  * Feature flag for AI fallback
  */
 const USE_AI_FALLBACK = process.env.USE_AI_FALLBACK !== 'false'; // Default: true
@@ -345,20 +543,41 @@ SIG: "${sig}"
 
 Return a JSON object with the following structure:
 {
-  "dose_unit": "tab" | "cap" | "mL",
+  "dose_unit": "tab" | "cap" | "mL" | "actuation" | "unit",
   "per_day": number,
   "confidence": "parsed"
 }
 
 Rules:
-- dose_unit: Normalize to "tab" (tablets), "cap" (capsules), or "mL" (liquids)
-- per_day: Calculate as quantity_per_dose × frequency_per_day
+- dose_unit: Normalize to "tab" (tablets), "cap" (capsules), "mL" (liquids), "actuation" (inhalers/sprays), or "unit" (insulin/other units)
+- per_day: Calculate the TOTAL quantity per day. This is CRITICAL - read carefully:
+  * TIME-BASED DOSING: If the SIG mentions specific times, times of day, or meals, you MUST ADD (sum) all quantities:
+    - "1 capsule in the morning and 2 capsules in the evening" = 3 per day (1 + 2 = 3)
+    - "1 tablet at 8am and 2 tablets at 8pm" = 3 per day (1 + 2 = 3)
+    - "Take 1 cap in the morning and 2 caps at bedtime" = 3 per day (1 + 2 = 3)
+    - "2 tablets with breakfast and 1 tablet with dinner" = 3 per day (2 + 1 = 3)
+    - Look for keywords: "in the morning", "in the evening", "at [time]", "with [meal]", "at bedtime", "at night", etc.
+    - When you see these patterns, DO NOT multiply - ADD the quantities together
+  * FREQUENCY-BASED DOSING: Only multiply when there's a clear frequency without specific times:
+    - "2 capsules twice daily" = 4 per day (2 × 2 = 4)
+    - "1 tablet three times daily" = 3 per day (1 × 3 = 3)
+    - "Take 5 mL by mouth three times daily" = 15 per day (5 × 3 = 15)
+  * CRITICAL: If the SIG contains words like "morning", "evening", "bedtime", "breakfast", "lunch", "dinner", "at [time]", or similar time/meal references, it is TIME-BASED and you must ADD quantities, not multiply
 - confidence: Always "parsed" for AI parsing
 
-Examples:
+Examples (CRITICAL - follow these patterns exactly):
 - "Take 1 tablet by mouth once daily" → {"dose_unit": "tab", "per_day": 1, "confidence": "parsed"}
-- "Take 2 capsules by mouth twice daily" → {"dose_unit": "cap", "per_day": 4, "confidence": "parsed"}
-- "Take 5 mL by mouth three times daily" → {"dose_unit": "mL", "per_day": 15, "confidence": "parsed"}
+- "Take 2 capsules by mouth twice daily" → {"dose_unit": "cap", "per_day": 4, "confidence": "parsed"} (frequency-based: 2 × 2)
+- "Take 5 mL by mouth three times daily" → {"dose_unit": "mL", "per_day": 15, "confidence": "parsed"} (frequency-based: 5 × 3)
+- "2 puffs BID" → {"dose_unit": "actuation", "per_day": 4, "confidence": "parsed"} (frequency-based: 2 × 2)
+- "10 units SC BID" → {"dose_unit": "unit", "per_day": 20, "confidence": "parsed"} (frequency-based: 10 × 2)
+- TIME-BASED EXAMPLES (MUST ADD, NOT MULTIPLY):
+  * "1 tablet at 8am and 2 tablets at 8pm" → {"dose_unit": "tab", "per_day": 3, "confidence": "parsed"} (1 + 2 = 3)
+  * "Take 1 capsule by mouth in the morning and 2 capsules in the evening" → {"dose_unit": "cap", "per_day": 3, "confidence": "parsed"} (1 + 2 = 3)
+  * "Take 1 cap in the morning and 2 caps at bedtime" → {"dose_unit": "cap", "per_day": 3, "confidence": "parsed"} (1 + 2 = 3)
+  * "1 tab at 9am, 1 tab at 1pm, 1 tab at 5pm" → {"dose_unit": "tab", "per_day": 3, "confidence": "parsed"} (1 + 1 + 1 = 3)
+  * "Take 2 tablets with breakfast and 1 tablet with dinner" → {"dose_unit": "tab", "per_day": 3, "confidence": "parsed"} (2 + 1 = 3)
+  * "1 capsule in the morning and 2 capsules in the evening" → {"dose_unit": "cap", "per_day": 3, "confidence": "parsed"} (1 + 2 = 3)
 
 ${unitOverride ? `Note: Use unit override "${unitOverride}" for dose_unit if applicable.` : ''}
 
@@ -454,10 +673,11 @@ Return only valid JSON, no additional text.`;
         });
         
         // Check if error is retryable (5xx or timeout)
+        const errorWithStatus = error as { status?: number; code?: string };
         const isRetryable = 
-          (error as any).status >= 500 ||
-          (error as any).code === 'ECONNABORTED' ||
-          (error as any).code === 'ETIMEDOUT';
+          (errorWithStatus.status !== undefined && errorWithStatus.status >= 500) ||
+          errorWithStatus.code === 'ECONNABORTED' ||
+          errorWithStatus.code === 'ETIMEDOUT';
         
         if (!isRetryable || attempt >= 1) {
           break;
@@ -538,6 +758,61 @@ export async function parseSIG(sig: string, unitOverride?: string): Promise<Pars
     timer.stop();
     recordCounter(METRICS.SIG_PARSE_ERROR, 1);
     throw error;
+  }
+}
+
+/**
+ * Parse SIG with metadata for reasoning
+ */
+export async function parseSIGWithMetadata(sig: string, unitOverride?: string): Promise<ParsedSIGWithMetadata> {
+  const timer = startTimer(METRICS.SIG_PARSE_DURATION);
+  
+  try {
+    // Try rules-based parsing first
+    const rulesResult = parseWithRulesWithMetadata(sig, unitOverride);
+    
+    if (rulesResult.parsed) {
+      timer.stop();
+      recordCounter(METRICS.SIG_PARSE_SUCCESS, 1, { method: 'rules' });
+      return rulesResult;
+    }
+
+    // Rules failed - try AI fallback if enabled
+    if (USE_AI_FALLBACK) {
+      logInfo('Rules-based parsing failed, trying AI fallback', {
+        sig: '[REDACTED]',
+      });
+      
+      const aiResult = await parseWithAI(sig, unitOverride);
+      timer.stop();
+      
+      if (aiResult) {
+        recordCounter(METRICS.SIG_PARSE_SUCCESS, 1, { method: 'ai' });
+        recordCounter(METRICS.SIG_PARSE_FALLBACK, 1);
+        // For AI parsing, we don't have intermediate values, so estimate frequency
+        // This is a best-effort approximation
+        const estimatedFrequency = aiResult.per_day >= 1 ? Math.round(aiResult.per_day) : 1;
+        return {
+          parsed: aiResult,
+          method: 'ai',
+          quantity_per_dose: 1, // AI doesn't provide this, use default
+          frequency: estimatedFrequency,
+        };
+      }
+      
+      // Both failed
+      recordCounter(METRICS.SIG_PARSE_ERROR, 1);
+      return { parsed: null, method: 'failed' };
+    }
+
+    // Both failed or AI fallback disabled
+    timer.stop();
+    recordCounter(METRICS.SIG_PARSE_ERROR, 1);
+    return { parsed: null, method: 'failed' };
+  } catch {
+    timer.stop();
+    recordCounter(METRICS.SIG_PARSE_ERROR, 1);
+    return { parsed: null, method: 'failed' };
   }
 }
 

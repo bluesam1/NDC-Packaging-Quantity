@@ -36,6 +36,19 @@ export const computeRequestSchema: z.ZodType<ComputeRequest> = z.object({
     .string()
     .min(2, { message: 'drug_input must be at least 2 characters' })
     .max(200, { message: 'drug_input must be at most 200 characters' })
+    .refine(
+      (val) => {
+        // If input is all digits (with optional hyphens), it must be a valid NDC format (11 digits)
+        const digitsOnly = val.replace(/[-\s]/g, '');
+        if (/^\d+$/.test(digitsOnly)) {
+          // It's all digits - must be exactly 11 digits to be valid NDC
+          return digitsOnly.length === 11;
+        }
+        // Not all digits, so it's a drug name - valid
+        return true;
+      },
+      { message: 'NDC must be 11 digits in format 00000-1111-22 or 00000111122' }
+    )
     .describe('Drug name (brand/generic) or NDC format (11 digits)'),
 
   sig: z
@@ -108,4 +121,60 @@ export const errorCodeSchema = z.enum([
   'internal_error',
   'rate_limit_exceeded',
 ]) satisfies z.ZodType<ErrorCode>;
+
+/**
+ * Validation schema for extract prescription request
+ * 
+ * Accepts base64 encoded image or image data URL
+ */
+export const extractPrescriptionRequestSchema = z.object({
+  image: z.string().min(1, { message: 'Image data is required' }),
+});
+
+/**
+ * Validation schema for extract prescription response
+ */
+export const extractPrescriptionResponseSchema = z.object({
+  data: z.object({
+    drug_input: z.string().optional(),
+    sig: z.string().optional(),
+    days_supply: z.number().optional(),
+    preferred_ndcs: z.array(z.string()).optional(),
+    quantity_unit_override: z.enum(['tab', 'cap', 'mL', 'actuation', 'unit']).optional(),
+  }),
+  fields_found: z.array(z.string()).describe('Array of field names that were successfully extracted'),
+});
+
+/**
+ * Validates an extract prescription request payload
+ * 
+ * @param data - The data to validate
+ * @returns Validated request or throws ZodError
+ */
+export function validateExtractPrescriptionRequest(data: unknown): { image: string } {
+  return extractPrescriptionRequestSchema.parse(data);
+}
+
+/**
+ * Validates an extract prescription request payload and returns detailed error information
+ * 
+ * @param data - The data to validate
+ * @returns Object with success flag and either validated data or field errors
+ */
+export function validateExtractPrescriptionRequestSafe(
+  data: unknown
+): { success: true; data: { image: string } } | { success: false; field_errors: Array<{ field: string; message: string }> } {
+  const result = extractPrescriptionRequestSchema.safeParse(data);
+
+  if (result.success) {
+    return { success: true, data: result.data };
+  }
+
+  const field_errors = result.error.issues.map((issue) => ({
+    field: issue.path.join('.'),
+    message: issue.message,
+  }));
+
+  return { success: false, field_errors };
+}
 

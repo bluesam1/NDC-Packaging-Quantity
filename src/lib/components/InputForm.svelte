@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { Button, Input, Card } from '$lib/components';
+	import ImageUpload from './ImageUpload.svelte';
 	import AdvancedOptions from './AdvancedOptions.svelte';
 	import {
 		validateDrugInput,
@@ -8,6 +9,8 @@
 		normalizeNDC,
 		parseNDCString
 	} from '$lib/utils/validation';
+	import { testFormDataStore, testSubmitTriggerStore, clearTestFormData } from '$lib/stores/testControl';
+	import { extractPrescriptionFromImage, getErrorMessage, ApiError } from '$lib/services/api';
 	
 	// Import type from backend (we'll create a shared types file or duplicate for now)
 	export type ComputeRequest = {
@@ -44,6 +47,12 @@
 	let sigError = $state<string | null>(null);
 	let daysSupplyError = $state<string | null>(null);
 	let touchedFields = $state<Set<string>>(new Set());
+
+	// OCR state
+	let ocrLoading = $state(false);
+	let ocrError = $state<string | null>(null);
+	let ocrSuccessMessage = $state<string | null>(null);
+	let ocrSuccessTimeout: ReturnType<typeof setTimeout> | null = $state(null);
 	
 	// Check if form is valid
 	let isFormValid = $derived(
@@ -148,6 +157,180 @@
 			handleSubmit(event);
 		}
 	}
+
+	async function handleImageUpload(file: File) {
+		ocrLoading = true;
+		ocrError = null;
+		ocrSuccessMessage = null;
+
+		// Clear any existing timeout
+		if (ocrSuccessTimeout) {
+			clearTimeout(ocrSuccessTimeout);
+			ocrSuccessTimeout = null;
+		}
+
+		// Validate file before processing
+		const acceptedFormats = ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'];
+		const maxSize = 10 * 1024 * 1024; // 10MB
+
+		if (!acceptedFormats.includes(file.type)) {
+			ocrError = 'Invalid file format. Please upload JPG, PNG, or PDF files.';
+			ocrLoading = false;
+			return;
+		}
+
+		if (file.size > maxSize) {
+			ocrError = `File size exceeds 10MB limit. Current size: ${(file.size / 1024 / 1024).toFixed(2)}MB`;
+			ocrLoading = false;
+			return;
+		}
+
+		try {
+			const result = await extractPrescriptionFromImage(file);
+
+			// Populate form fields with extracted data
+			if (result.data.drug_input) {
+				drugInput = result.data.drug_input;
+				validateField('drug_input', drugInput);
+			}
+			if (result.data.sig) {
+				sig = result.data.sig;
+				validateField('sig', sig);
+			}
+			if (result.data.days_supply !== undefined && result.data.days_supply !== null) {
+				daysSupply = result.data.days_supply;
+				validateField('days_supply', daysSupply);
+			}
+
+			// Build success message
+			const fieldNames: Record<string, string> = {
+				drug_input: 'Drug Name',
+				sig: 'SIG',
+				days_supply: 'Days Supply',
+			};
+
+			const foundFields = result.fields_found.map((field) => fieldNames[field] || field);
+			const missingFields = ['drug_input', 'sig', 'days_supply']
+				.filter((field) => !result.fields_found.includes(field))
+				.map((field) => fieldNames[field] || field);
+
+			if (foundFields.length > 0) {
+				let message = `Found and populated: ${foundFields.join(', ')}`;
+				if (missingFields.length > 0) {
+					message += ` (${missingFields.join(', ')} not found)`;
+				}
+				ocrSuccessMessage = message;
+
+				// Auto-dismiss after 8 seconds
+				ocrSuccessTimeout = setTimeout(() => {
+					ocrSuccessMessage = null;
+					ocrSuccessTimeout = null;
+				}, 8000);
+			} else {
+				ocrError = 'No prescription data could be extracted from the image. Please try again or enter manually.';
+			}
+		} catch (error) {
+			if (error instanceof ApiError) {
+				ocrError = getErrorMessage(error);
+			} else {
+				ocrError = error instanceof Error ? error.message : 'Failed to extract prescription data. Please try again.';
+			}
+		} finally {
+			ocrLoading = false;
+		}
+	}
+
+	function dismissSuccessMessage() {
+		ocrSuccessMessage = null;
+		if (ocrSuccessTimeout) {
+			clearTimeout(ocrSuccessTimeout);
+			ocrSuccessTimeout = null;
+		}
+	}
+
+	// Subscribe to test form data store for programmatic test control
+	import { onMount } from 'svelte';
+	
+	// Reactive state for test form data
+	let testFormDataValue = $state<{ drug_input: string; sig: string; days_supply: number; preferred_ndcs?: string[]; quantity_unit_override?: 'tab' | 'cap' | 'mL' | 'actuation' | 'unit' } | null>(null);
+	let testSubmitTriggerValue = $state(0);
+	
+	// Subscribe to test form data store
+	let unsubscribeTestForm: (() => void) | null = null;
+	let unsubscribeTestSubmit: (() => void) | null = null;
+	
+	// Use onMount to set up subscriptions
+	onMount(() => {
+		// Subscribe to test form data
+		unsubscribeTestForm = testFormDataStore.subscribe((data) => {
+			if (data) {
+				console.log('Test form data received:', data);
+				// Set form values from test data immediately
+				drugInput = data.drug_input;
+				sig = data.sig;
+				daysSupply = data.days_supply;
+				preferredNDCs = data.preferred_ndcs;
+				quantityUnitOverride = data.quantity_unit_override;
+				
+				console.log('Form values set:', { drugInput, sig, daysSupply });
+				
+				// Clear validation errors
+				drugInputError = null;
+				sigError = null;
+				daysSupplyError = null;
+				
+				// Mark fields as touched so validation runs
+				touchedFields.add('drug_input');
+				touchedFields.add('sig');
+				touchedFields.add('days_supply');
+				
+				// Validate fields
+				validateField('drug_input', drugInput);
+				validateField('sig', sig);
+				validateField('days_supply', daysSupply);
+			}
+		});
+		
+		// Subscribe to test submit trigger
+		unsubscribeTestSubmit = testSubmitTriggerStore.subscribe((trigger) => {
+			if (trigger > 0 && trigger !== testSubmitTriggerValue) {
+				console.log('Test submit trigger:', trigger);
+				testSubmitTriggerValue = trigger;
+				// Wait for form values to update and validation to complete
+				setTimeout(() => {
+					// Re-validate to ensure form is valid
+					validateField('drug_input', drugInput);
+					validateField('sig', sig);
+					validateField('days_supply', daysSupply);
+					
+					console.log('Form valid after validation:', isFormValid, 'Loading:', loading);
+					
+					// Wait another tick for validation to complete
+					setTimeout(() => {
+						if (isFormValid && !loading) {
+							console.log('Submitting form via test trigger');
+							// Trigger form submission
+							const form = document.querySelector('.input-form') as HTMLFormElement;
+							if (form) {
+								const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
+								form.dispatchEvent(submitEvent);
+							}
+						} else {
+							console.log('Form not ready to submit:', { isFormValid, loading });
+						}
+					}, 100);
+				}, 100);
+			}
+		});
+		
+		return () => {
+			if (unsubscribeTestForm) unsubscribeTestForm();
+			if (unsubscribeTestSubmit) unsubscribeTestSubmit();
+			if (ocrSuccessTimeout) {
+				clearTimeout(ocrSuccessTimeout);
+			}
+		};
+	});
 </script>
 
 <form
@@ -160,6 +343,27 @@
 		<h2 class="input-form__title">Calculate Quantity</h2>
 		
 		<div class="input-form__fields">
+			<ImageUpload
+				onUpload={handleImageUpload}
+				loading={ocrLoading}
+				error={ocrError}
+				class="input-form__image-upload"
+			/>
+
+			{#if ocrSuccessMessage}
+				<div class="input-form__success-message" role="alert">
+					<span class="input-form__success-icon">✓</span>
+					<span class="input-form__success-text">{ocrSuccessMessage}</span>
+					<button
+						type="button"
+						onclick={dismissSuccessMessage}
+						class="input-form__success-dismiss"
+						aria-label="Dismiss success message"
+					>
+						✕
+					</button>
+				</div>
+			{/if}
 			<Input
 				label="Drug Name or NDC"
 				placeholder="e.g., amoxicillin 500 mg cap or 00000-1111-22"
@@ -236,6 +440,55 @@
 	.input-form__submit {
 		width: 100%;
 		margin-top: var(--space-4);
+	}
+	
+	.input-form__image-upload {
+		margin-bottom: var(--space-4);
+	}
+
+	.input-form__success-message {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		padding: var(--space-4);
+		background-color: var(--success-50, #f0fdf4);
+		border: 1px solid var(--success-300, #86efac);
+		border-radius: var(--border-radius-md);
+		color: var(--success-700, #15803d);
+		font-size: var(--text-sm);
+		margin-bottom: var(--space-4);
+	}
+
+	.input-form__success-icon {
+		font-size: var(--text-lg);
+		flex-shrink: 0;
+	}
+
+	.input-form__success-text {
+		flex: 1;
+	}
+
+	.input-form__success-dismiss {
+		background: none;
+		border: none;
+		color: var(--success-700, #15803d);
+		cursor: pointer;
+		padding: var(--space-1);
+		font-size: var(--text-lg);
+		line-height: 1;
+		opacity: 0.7;
+		transition: opacity 150ms ease;
+		flex-shrink: 0;
+	}
+
+	.input-form__success-dismiss:hover {
+		opacity: 1;
+	}
+
+	.input-form__success-dismiss:focus-visible {
+		outline: 2px solid var(--success-500, #22c55e);
+		outline-offset: 2px;
+		border-radius: var(--border-radius-sm);
 	}
 	
 	@media (min-width: 640px) {
