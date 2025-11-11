@@ -226,34 +226,45 @@ export class FDAClient {
       return null;
     }
 
+    // Check if this is insulin (for special package size handling)
+    const isInsulin = this.isInsulinProduct(result);
+
     // Parse package size from multiple possible sources
     let pkgSize = 0;
     
-    // 1. Try package_size field
-    if (result.package_size) {
-      const sizeMatch = result.package_size.match(/(\d+)/);
-      if (sizeMatch) {
-        pkgSize = parseInt(sizeMatch[1], 10);
-      }
+    // Special handling for insulin: calculate total units from volume
+    if (isInsulin) {
+      pkgSize = this.parseInsulinPackageSize(result);
     }
     
-    // 2. Try package_description field
-    if (pkgSize === 0 && result.package_description) {
-      const descMatch = result.package_description.match(/(\d+)\s*(TAB|CAP|TABLET|CAPSULE|ML|MG)/i);
-      if (descMatch) {
-        pkgSize = parseInt(descMatch[1], 10);
+    // Standard parsing for non-insulin products
+    if (pkgSize === 0) {
+      // 1. Try package_size field
+      if (result.package_size) {
+        const sizeMatch = result.package_size.match(/(\d+)/);
+        if (sizeMatch) {
+          pkgSize = parseInt(sizeMatch[1], 10);
+        }
       }
-    }
-    
-    // 3. Try packaging array (FDA API often returns package info here)
-    if (pkgSize === 0 && Array.isArray(result.packaging) && result.packaging.length > 0) {
-      // Use the first packaging entry
-      const firstPackage = result.packaging[0];
-      if (firstPackage.description) {
-        // Parse from description like "100 CAPSULE in 1 BOTTLE"
-        const descMatch = firstPackage.description.match(/(\d+)\s*(TAB|CAP|TABLET|CAPSULE|ML|MG|BLISTER|BOTTLE)/i);
+      
+      // 2. Try package_description field
+      if (pkgSize === 0 && result.package_description) {
+        const descMatch = result.package_description.match(/(\d+)\s*(TAB|CAP|TABLET|CAPSULE|ML|MG)/i);
         if (descMatch) {
           pkgSize = parseInt(descMatch[1], 10);
+        }
+      }
+      
+      // 3. Try packaging array (FDA API often returns package info here)
+      if (pkgSize === 0 && Array.isArray(result.packaging) && result.packaging.length > 0) {
+        // Use the first packaging entry
+        const firstPackage = result.packaging[0];
+        if (firstPackage.description) {
+          // Parse from description like "100 CAPSULE in 1 BOTTLE"
+          const descMatch = firstPackage.description.match(/(\d+)\s*(TAB|CAP|TABLET|CAPSULE|ML|MG|BLISTER|BOTTLE)/i);
+          if (descMatch) {
+            pkgSize = parseInt(descMatch[1], 10);
+          }
         }
       }
     }
@@ -271,7 +282,129 @@ export class FDAClient {
       active,
       dosage_form: result.dosage_form,
       brand_name: result.brand_name,
+      package_description: result.package_description || (Array.isArray(result.packaging) && result.packaging.length > 0 ? result.packaging[0].description : undefined),
     };
+  }
+
+  /**
+   * Check if product is insulin based on dosage form or brand name
+   */
+  private isInsulinProduct(result: NonNullable<FDAResponse['results']>[0]): boolean {
+    const dosageForm = result.dosage_form?.toUpperCase() || '';
+    const brandName = result.brand_name?.toLowerCase() || '';
+    const packageDesc = result.package_description?.toLowerCase() || '';
+    
+    // Check for insulin keywords
+    const insulinKeywords = ['insulin', 'humalog', 'novolog', 'lantus', 'levemir', 'tresiba', 'basaglar', 'toujeo', 'apidra', 'fiasp'];
+    const hasInsulinKeyword = insulinKeywords.some(keyword => 
+      brandName.includes(keyword) || packageDesc.includes(keyword)
+    );
+    
+    // Check for insulin dosage forms (injection/solution for insulin)
+    const isInjection = dosageForm.includes('INJECTION') || dosageForm.includes('SOLUTION');
+    
+    return hasInsulinKeyword || (isInjection && (brandName.includes('insulin') || packageDesc.includes('insulin')));
+  }
+
+  /**
+   * Parse insulin package size from FDA data
+   * For insulin, package_size should represent total units in the package
+   * Typical packages:
+   * - Vials: 10 mL = 1000 units (U100), 3 mL = 300 units (U100)
+   * - Pens: 3 mL = 300 units (U100), 1.5 mL = 150 units (U100)
+   */
+  private parseInsulinPackageSize(result: NonNullable<FDAResponse['results']>[0]): number {
+    const packageDesc = (result.package_description || '').toLowerCase();
+    const brandName = (result.brand_name || '').toLowerCase();
+    const packageSize = result.package_size || '';
+    
+    // Default concentration (U100 = 100 units/mL)
+    let concentration = 100;
+    
+    // Check for concentration in name/description (U100, U200, U500)
+    const concentrationMatch = (packageDesc + ' ' + brandName).match(/\b(u\d{3})\b/i);
+    if (concentrationMatch) {
+      const concStr = concentrationMatch[1].toLowerCase();
+      if (concStr === 'u200') concentration = 200;
+      else if (concStr === 'u500') concentration = 500;
+      // else u100 = 100 (default)
+    }
+    
+    // Try to extract volume from package description
+    // Patterns: "10 ML", "3 ML", "1 VIAL", "1 PEN", etc.
+    let volumeML = 0;
+    
+    // Pattern 1: Extract mL volume directly
+    const mlMatch = packageDesc.match(/(\d+(?:\.\d+)?)\s*ml/i);
+    if (mlMatch) {
+      volumeML = parseFloat(mlMatch[1]);
+    }
+    
+    // Pattern 2: Extract from "X VIAL" or "X PEN" and infer volume
+    if (volumeML === 0) {
+      const vialMatch = packageDesc.match(/(\d+)\s*vial/i);
+      const penMatch = packageDesc.match(/(\d+)\s*pen/i);
+      
+      if (vialMatch) {
+        const vialCount = parseInt(vialMatch[1], 10);
+        // Standard vial is 10 mL, but could be 3 mL
+        // Check if description mentions size
+        const smallVialMatch = packageDesc.match(/3\s*ml|small/i);
+        volumeML = vialCount * (smallVialMatch ? 3 : 10);
+      } else if (penMatch) {
+        const penCount = parseInt(penMatch[1], 10);
+        // Standard pen is 3 mL, but could be 1.5 mL
+        const smallPenMatch = packageDesc.match(/1\.5|1\s*1\/2/i);
+        volumeML = penCount * (smallPenMatch ? 1.5 : 3);
+      }
+    }
+    
+    // Pattern 3: Try package_size field - might be volume in mL
+    if (volumeML === 0 && packageSize) {
+      const sizeMatch = packageSize.match(/(\d+(?:\.\d+)?)/);
+      if (sizeMatch) {
+        const sizeValue = parseFloat(sizeMatch[1]);
+        // If it's a reasonable volume (1-20 mL), treat as volume
+        if (sizeValue >= 1 && sizeValue <= 20) {
+          volumeML = sizeValue;
+        }
+      }
+    }
+    
+    // Pattern 4: Try packaging array
+    if (volumeML === 0 && Array.isArray(result.packaging) && result.packaging.length > 0) {
+      const firstPackage = result.packaging[0];
+      if (firstPackage.description) {
+        const desc = firstPackage.description.toLowerCase();
+        const mlMatch = desc.match(/(\d+(?:\.\d+)?)\s*ml/i);
+        if (mlMatch) {
+          volumeML = parseFloat(mlMatch[1]);
+        } else {
+          const vialMatch = desc.match(/(\d+)\s*vial/i);
+          const penMatch = desc.match(/(\d+)\s*pen/i);
+          if (vialMatch) {
+            volumeML = parseInt(vialMatch[1], 10) * 10; // Default to 10 mL vials
+          } else if (penMatch) {
+            volumeML = parseInt(penMatch[1], 10) * 3; // Default to 3 mL pens
+          }
+        }
+      }
+    }
+    
+    // Calculate total units: volume (mL) × concentration (units/mL)
+    if (volumeML > 0) {
+      const totalUnits = Math.round(volumeML * concentration);
+      logInfo('Parsed insulin package size', {
+        packageDesc: packageDesc.substring(0, 100),
+        volumeML,
+        concentration,
+        totalUnits,
+      });
+      return totalUnits;
+    }
+    
+    // If we can't determine volume, return 0 to fall back to standard parsing
+    return 0;
   }
 
   /**
@@ -463,10 +596,18 @@ export class FDAClient {
 
 /**
  * Create a default FDA client instance
+ * Uses real APIs by default unless USE_MOCK_APIS=true is set
  */
 export function createFDAClient(): FDAClient {
+  const useMockApis = process.env.USE_MOCK_APIS === 'true';
+  
+  // Determine base URL: use mock if USE_MOCK_APIS=true, otherwise use real API
+  const baseUrl = useMockApis
+    ? (process.env.MOCK_FDA_URL || 'http://localhost:3001')
+    : (process.env.FDA_API_URL || 'https://api.fda.gov/drug/ndc.json');
+  
   return new FDAClient({
-    baseUrl: process.env.FDA_API_URL || 'https://api.fda.gov/drug/ndc.json',
+    baseUrl,
     timeout: 5000,
     maxRetries: 1,
     cacheTTL: 86400000, // 24 hours

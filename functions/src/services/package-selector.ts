@@ -15,6 +15,7 @@ export interface SelectionConfig {
   maxPacks?: number; // Default: 3
   maxOverfill?: number; // Default: 0.10 (10%)
   preferredNdcs?: string[]; // Optional preferred NDCs for ranking bias
+  baseQty?: number; // Base quantity before rounding (for accurate overfill calculation)
 }
 
 /**
@@ -53,6 +54,31 @@ export interface PackageSelection {
     brand_name?: string;
     dosage_form?: string;
   }>;
+}
+
+/**
+ * Score breakdown for reasoning
+ */
+export interface ScoreBreakdown {
+  base_score: number;
+  overfill_penalty?: number;
+  pack_penalty?: number;
+  preferred_boost?: number;
+}
+
+/**
+ * Package selection result with scoring details
+ */
+export interface PackageSelectionWithScoring extends PackageSelection {
+  scoring_details?: {
+    chosen?: {
+      ndc: string;
+      score: number;
+      score_breakdown: ScoreBreakdown;
+      reason: string;
+    };
+    considered_options: number;
+  };
 }
 
 /**
@@ -116,19 +142,79 @@ function scorePackage(
 }
 
 /**
+ * Score a package option and return breakdown for reasoning
+ */
+function scorePackageWithBreakdown(
+  option: PackageOption,
+  totalQty: number,
+  maxOverfill: number,
+  preferredNdcs?: string[]
+): { score: number; breakdown: ScoreBreakdown } {
+  let baseScore = 0;
+  let overfillPenalty: number | undefined;
+  let packPenalty: number | undefined;
+  let preferredBoost: number | undefined;
+
+  // Underfill (negative overfill) - reject (score = 0)
+  if (option.overfill < 0) {
+    return { score: 0, breakdown: { base_score: 0 } };
+  }
+  // Exact match (overfill = 0) - highest priority (score = 1000)
+  else if (option.overfill === 0) {
+    baseScore = 1000;
+  }
+  // Minimal overfill (0 < overfill ≤ maxOverfill) - next priority
+  else if (option.overfill > 0 && option.overfill <= maxOverfill) {
+    // Score decreases as overfill increases
+    baseScore = 1000 * (1 - option.overfill / maxOverfill);
+    overfillPenalty = 1000 - baseScore;
+  }
+  // Over overfill limit - reject (score = 0)
+  else {
+    return { score: 0, breakdown: { base_score: 0 } };
+  }
+
+  // Apply pack count penalty (prefer fewer packs)
+  const packCountPenalty = (option.packs - 1) * 10;
+  if (packCountPenalty > 0) {
+    packPenalty = packCountPenalty;
+  }
+
+  // Apply preferred NDC boost (within same score tier)
+  if (preferredNdcs && preferredNdcs.includes(option.ndc)) {
+    preferredBoost = 50;
+  }
+
+  const finalScore = baseScore - (packPenalty || 0) + (preferredBoost || 0);
+
+  return {
+    score: finalScore,
+    breakdown: {
+      base_score: baseScore,
+      overfill_penalty: overfillPenalty,
+      pack_penalty: packPenalty,
+      preferred_boost: preferredBoost,
+    },
+  };
+}
+
+/**
  * Generate all possible package combinations for an NDC
  */
 function generateCombinations(
   ndc: NDCPackageData,
   totalQty: number,
-  maxPacks: number
+  maxPacks: number,
+  baseQty?: number
 ): PackageOption[] {
   const combinations: PackageOption[] = [];
+  // Use baseQty for overfill calculation if provided, otherwise use totalQty
+  const overfillQty = baseQty ?? totalQty;
 
   // Try 1-pack, 2-pack, 3-pack combinations
   for (let packs = 1; packs <= maxPacks; packs++) {
     const packageQty = ndc.pkg_size * packs;
-    const overfill = calculateOverfill(totalQty, packageQty);
+    const overfill = calculateOverfill(overfillQty, packageQty);
 
     combinations.push({
       ndc: ndc.ndc,
@@ -161,9 +247,11 @@ export function selectPackages(
   const maxPacks = config.maxPacks ?? DEFAULT_MAX_PACKS;
   const maxOverfill = config.maxOverfill ?? DEFAULT_MAX_OVERFILL;
   const preferredNdcs = config.preferredNdcs || [];
+  const baseQty = config.baseQty;
 
   logInfo('Starting package selection', {
     totalQty,
+    baseQty,
     ndcCount: ndcs.length,
     maxPacks,
     maxOverfill,
@@ -186,7 +274,7 @@ export function selectPackages(
   const allOptions: PackageOption[] = [];
 
   for (const ndc of activeNdcs) {
-    const combinations = generateCombinations(ndc, totalQty, maxPacks);
+    const combinations = generateCombinations(ndc, totalQty, maxPacks, baseQty);
     allOptions.push(...combinations);
   }
 
@@ -264,6 +352,165 @@ export function selectPackages(
   return {
     chosen: chosenPackage,
     alternates,
+  };
+}
+
+/**
+ * Select packages with scoring details for reasoning
+ */
+export function selectPackagesWithScoring(
+  ndcs: NDCPackageData[],
+  totalQty: number,
+  config: SelectionConfig = {}
+): PackageSelectionWithScoring {
+  const maxPacks = config.maxPacks ?? DEFAULT_MAX_PACKS;
+  const maxOverfill = config.maxOverfill ?? DEFAULT_MAX_OVERFILL;
+  const preferredNdcs = config.preferredNdcs || [];
+  const baseQty = config.baseQty;
+
+  logInfo('Starting package selection', {
+    totalQty,
+    baseQty,
+    ndcCount: ndcs.length,
+    maxPacks,
+    maxOverfill,
+    preferredNdcsCount: preferredNdcs.length,
+  });
+
+  // Pre-filter NDCs by active status (FDA as source of truth)
+  const activeNdcs = ndcs.filter((ndc) => ndc.active);
+  const inactiveNdcs = ndcs.filter((ndc) => !ndc.active).map((ndc) => ndc.ndc);
+
+  if (activeNdcs.length === 0) {
+    logWarn('No active NDCs found', { totalQty, inactiveNdcs });
+    return {
+      chosen: undefined,
+      alternates: [],
+      scoring_details: {
+        considered_options: 0,
+      },
+    };
+  }
+
+  // Generate all possible combinations
+  const allOptions: PackageOption[] = [];
+
+  for (const ndc of activeNdcs) {
+    const combinations = generateCombinations(ndc, totalQty, maxPacks, baseQty);
+    allOptions.push(...combinations);
+  }
+
+  // Score and filter options
+  const validOptions: PackageOption[] = [];
+  const scoringData: Array<{ option: PackageOption; breakdown: ScoreBreakdown }> = [];
+
+  for (const option of allOptions) {
+    // Enforce MAX_PACKS constraint
+    if (option.packs > maxPacks) {
+      continue;
+    }
+
+    // Enforce OVERFILL_MAX constraint
+    if (option.overfill > maxOverfill) {
+      continue;
+    }
+
+    // Score the option with breakdown
+    const { score, breakdown } = scorePackageWithBreakdown(option, totalQty, maxOverfill, preferredNdcs);
+    option.score = score;
+
+    // Only include options with positive scores
+    if (option.score > 0) {
+      validOptions.push(option);
+      scoringData.push({ option, breakdown });
+    }
+  }
+
+  // Sort by score (highest first)
+  validOptions.sort((a, b) => b.score - a.score);
+
+  if (validOptions.length === 0) {
+    logWarn('No suitable package found', {
+      totalQty,
+      activeNdcsCount: activeNdcs.length,
+      maxPacks,
+      maxOverfill,
+    });
+    return {
+      chosen: undefined,
+      alternates: [],
+      scoring_details: {
+        considered_options: allOptions.length,
+      },
+    };
+  }
+
+  // Select best match as chosen
+  const chosen = validOptions[0];
+  const chosenScoring = scoringData.find(s => s.option.ndc === chosen.ndc && s.option.packs === chosen.packs);
+  const chosenPackage = {
+    ndc: chosen.ndc,
+    pkg_size: chosen.pkg_size,
+    active: chosen.active,
+    overfill: chosen.overfill,
+    packs: chosen.packs,
+    brand_name: chosen.brand_name,
+    dosage_form: chosen.dosage_form,
+  };
+
+  // Generate reason for selection
+  let reason = '';
+  if (chosen.overfill === 0) {
+    reason = 'Exact match';
+    if (chosen.packs === 1) {
+      reason += ' with single pack';
+    } else {
+      reason += ` with ${chosen.packs} pack(s)`;
+    }
+  } else if (chosen.overfill <= maxOverfill) {
+    reason = `Minimal overfill (${(chosen.overfill * 100).toFixed(1)}%)`;
+    if (chosen.packs === 1) {
+      reason += ' with single pack';
+    } else {
+      reason += ` with ${chosen.packs} pack(s)`;
+    }
+  }
+  if (preferredNdcs && preferredNdcs.includes(chosen.ndc)) {
+    reason += ' (preferred NDC)';
+  }
+
+  // Select next 10 as alternates
+  const alternates = validOptions
+    .slice(1, 11) // Next 10 options
+    .map((option) => ({
+      ndc: option.ndc,
+      pkg_size: option.pkg_size,
+      active: option.active,
+      overfill: option.overfill,
+      packs: option.packs,
+      brand_name: option.brand_name,
+      dosage_form: option.dosage_form,
+    }));
+
+  logInfo('Package selection completed', {
+    totalQty,
+    chosen: chosenPackage,
+    alternatesCount: alternates.length,
+    inactiveNdcsCount: inactiveNdcs.length,
+  });
+
+  return {
+    chosen: chosenPackage,
+    alternates,
+    scoring_details: {
+      chosen: chosenScoring ? {
+        ndc: chosen.ndc,
+        score: chosen.score,
+        score_breakdown: chosenScoring.breakdown,
+        reason,
+      } : undefined,
+      considered_options: allOptions.length,
+    },
   };
 }
 

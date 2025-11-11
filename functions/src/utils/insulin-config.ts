@@ -156,4 +156,37 @@ export function isVialFormat(drugName: string): boolean {
   return normalizedName.includes('vial');
 }
 
+/**
+ * Determine if package description suggests vial format
+ * 
+ * @param packageDescription - Package description from FDA data
+ * @returns True if vial format suggested
+ */
+export function isVialFormatFromPackage(packageDescription?: string): boolean {
+  if (!packageDescription) {
+    return false;
+  }
+  
+  const normalized = packageDescription.toLowerCase();
+  return normalized.includes('vial') && !normalized.includes('pen');
+}
+
+/**
+ * Determine if package description suggests pen format
+ * 
+ * @param packageDescription - Package description from FDA data
+ * @returns True if pen format suggested
+ */
+export function isPenFormatFromPackage(packageDescription?: string): boolean {
+  if (!packageDescription) {
+    return false;
+  }
+  
+  const normalized = packageDescription.toLowerCase();
+  return normalized.includes('pen') || 
+         normalized.includes('flexpen') || 
+         normalized.includes('kwikpen') ||
+         normalized.includes('solostar');
+}
+
 

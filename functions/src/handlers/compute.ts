@@ -13,10 +13,10 @@
 
 import { createRxNormClient } from '../services/rxnorm-client';
 import { createFDAClient } from '../services/fda-client';
-import { parseSIG } from '../services/sig-parser';
-import { calculateQuantity } from '../services/quantity-calculator';
-import { selectPackages } from '../services/package-selector';
-import { detectDosageForm } from '../services/dosage-form-detector';
+import { parseSIGWithMetadata } from '../services/sig-parser';
+import { calculateQuantityWithRounding } from '../services/quantity-calculator';
+import { selectPackagesWithScoring } from '../services/package-selector';
+import { detectDosageFormWithMetadata } from '../services/dosage-form-detector';
 import { logInfo, logWarn, logError } from '../utils/logger';
 import { DependencyError, ParseError } from '../utils/errors';
 import type { ComputeRequest, ComputeResponse } from '../types/index';
@@ -35,45 +35,85 @@ interface MergedData {
 }
 
 /**
+ * API call results for reasoning
+ */
+interface APICallResults {
+  rxnorm?: { rxcui: string | null; name: string | null; ndcs: string[]; failed: boolean };
+  fda?: { ndcs: NDCPackageData[]; failed: boolean; isDirectNDC: boolean };
+  execution_time_ms: number;
+}
+
+/**
  * Execute parallel API calls and merge data
  * 
  * @param request - Compute request
  * @param correlationId - Optional correlation ID for logging
  * @returns Merged data from both APIs
  */
+/**
+ * Check if drug_input is an NDC format
+ */
+function isNDCFormat(input: string): boolean {
+	const ndcFormatRegex = /^(\d{5}-\d{4}-\d{2}|\d{11})$/;
+	return ndcFormatRegex.test(input);
+}
+
 export async function executeParallelAPICalls(
-  request: ComputeRequest,
-  correlationId?: string
-): Promise<MergedData> {
-  const context = { correlationId, drug_input: request.drug_input };
-  const startTime = Date.now();
+	request: ComputeRequest,
+	correlationId: string | undefined,
+	returnAPICallResults: true
+): Promise<MergedData & { apiCallResults: APICallResults }>;
 
-  const rxnormClient = createRxNormClient();
-  const fdaClient = createFDAClient();
+export async function executeParallelAPICalls(
+	request: ComputeRequest,
+	correlationId?: string,
+	returnAPICallResults?: false
+): Promise<MergedData>;
 
-  // Execute RxNorm and FDA calls in parallel using Promise.allSettled
-  // This allows us to handle partial failures gracefully
-  const [rxnormResult, fdaResult] = await Promise.allSettled([
-    // RxNorm: Find RxCUI by drug name
-    rxnormClient.findRxcuiByString(request.drug_input, correlationId).then(async (rxcui) => {
-      if (!rxcui) {
-        // Try approximate matching as fallback
-        logInfo('RxNorm primary lookup failed, trying approximate match', context);
-        return await rxnormClient.approximateTerm(request.drug_input, correlationId);
-      }
-      return rxcui;
-    }).then(async (rxcui) => {
-      if (!rxcui) {
-        return { rxcui: null, name: null, ndcs: [] };
-      }
-      // Get NDCs for this RxCUI
-      const ndcs = await rxnormClient.getNdcsByRxcui(rxcui, correlationId);
-      return { rxcui, name: request.drug_input, ndcs };
-    }),
-    
-    // FDA: Search by brand name
-    fdaClient.searchByBrandName(request.drug_input, correlationId),
-  ]);
+export async function executeParallelAPICalls(
+	request: ComputeRequest,
+	correlationId?: string,
+	returnAPICallResults = false
+): Promise<MergedData | (MergedData & { apiCallResults: APICallResults })> {
+	const context = { correlationId, drug_input: request.drug_input };
+	const startTime = Date.now();
+
+	const rxnormClient = createRxNormClient();
+	const fdaClient = createFDAClient();
+
+	// Check if drug_input is a direct NDC
+	const isDirectNDC = isNDCFormat(request.drug_input);
+
+	// Execute RxNorm and FDA calls in parallel using Promise.allSettled
+	// This allows us to handle partial failures gracefully
+	const [rxnormResult, fdaResult] = await Promise.allSettled([
+		// RxNorm: Find RxCUI by drug name (skip if direct NDC)
+		isDirectNDC 
+			? Promise.resolve({ rxcui: null, name: null, ndcs: [] })
+			: rxnormClient.findRxcuiByString(request.drug_input, correlationId).then(async (rxcui) => {
+				if (!rxcui) {
+					// Try approximate matching as fallback
+					logInfo('RxNorm primary lookup failed, trying approximate match', context);
+					return await rxnormClient.approximateTerm(request.drug_input, correlationId);
+				}
+				return rxcui;
+			}).then(async (rxcui) => {
+				if (!rxcui) {
+					return { rxcui: null, name: null, ndcs: [] };
+				}
+				// Get NDCs for this RxCUI
+				const ndcs = await rxnormClient.getNdcsByRxcui(rxcui, correlationId);
+				return { rxcui, name: request.drug_input, ndcs };
+			}),
+		
+		// FDA: If direct NDC, lookup by NDC; otherwise search by brand name
+		isDirectNDC
+			? fdaClient.lookupByNDC(request.drug_input, correlationId).then(ndcData => {
+				// Return as array for consistency
+				return ndcData ? [ndcData] : [];
+			})
+			: fdaClient.searchByBrandName(request.drug_input, correlationId),
+	]);
 
   const executionTime = Date.now() - startTime;
   logInfo('Parallel API execution completed', { ...context, executionTimeMs: executionTime });
@@ -102,12 +142,41 @@ export async function executeParallelAPICalls(
 
   if (fdaResult.status === 'fulfilled') {
     fdaData = fdaResult.value;
+    
+    // If direct NDC lookup returned null (not found), add it as inactive
+    if (isDirectNDC && fdaData.length === 0) {
+      const normalizedNDC = request.drug_input.replace(/[-\s]/g, '');
+      fdaData = [{
+        ndc: normalizedNDC,
+        pkg_size: 0,
+        active: false,
+        dosage_form: undefined,
+        brand_name: undefined,
+      }];
+    }
+    // If direct NDC lookup returned an inactive NDC, ensure it's marked as inactive
+    else if (isDirectNDC && fdaData.length > 0 && !fdaData[0].active) {
+      // Already marked as inactive, but ensure it's in the flags
+      // This will be handled by the flags.inactive_ndcs filter below
+    }
   } else {
     fdaFailed = true;
     logWarn('FDA API call failed', {
       ...context,
       error: fdaResult.reason?.message || 'Unknown error',
     });
+    
+    // If direct NDC lookup failed, add it as inactive
+    if (isDirectNDC) {
+      const normalizedNDC = request.drug_input.replace(/[-\s]/g, '');
+      fdaData = [{
+        ndc: normalizedNDC,
+        pkg_size: 0,
+        active: false,
+        dosage_form: undefined,
+        brand_name: undefined,
+      }];
+    }
   }
 
   // Handle partial failures
@@ -127,7 +196,7 @@ export async function executeParallelAPICalls(
   // Detect mismatches
   const mismatch = detectMismatch(rxnormData.ndcs, fdaData, context);
 
-  return {
+  const result: MergedData = {
     rxcui: merged.rxcui,
     name: merged.name,
     ndcs: merged.ndcs,
@@ -135,6 +204,26 @@ export async function executeParallelAPICalls(
     rxnormFailed,
     fdaFailed,
   };
+
+  if (returnAPICallResults) {
+    const apiCallResults: APICallResults = {
+      rxnorm: {
+        rxcui: rxnormData.rxcui,
+        name: rxnormData.name,
+        ndcs: rxnormData.ndcs,
+        failed: rxnormFailed,
+      },
+      fda: {
+        ndcs: fdaData,
+        failed: fdaFailed,
+        isDirectNDC: isDirectNDC,
+      },
+      execution_time_ms: executionTime,
+    };
+    return { ...result, apiCallResults };
+  }
+
+  return result;
 }
 
 /**
@@ -265,13 +354,14 @@ export async function handleCompute(
   const context = { correlationId, drug_input: request.drug_input };
 
   try {
-    // Step 1: Execute parallel API calls and merge data
-    const merged = await executeParallelAPICalls(request, correlationId);
+    // Step 1: Execute parallel API calls and merge data (with reasoning data)
+    const mergedWithAPIResults = await executeParallelAPICalls(request, correlationId, true);
+    const { apiCallResults, ...merged } = mergedWithAPIResults;
 
-    // Step 2: Parse SIG
-    const parsedSIG = await parseSIG(request.sig, request.quantity_unit_override);
+    // Step 2: Parse SIG with metadata
+    const sigParsingResult = await parseSIGWithMetadata(request.sig, request.quantity_unit_override);
     
-    if (!parsedSIG) {
+    if (!sigParsingResult.parsed) {
       // SIG parsing failed - return parse_error
       throw new ParseError(
         'Unable to parse prescription directions (SIG). Please check the format and try again.',
@@ -279,32 +369,38 @@ export async function handleCompute(
       );
     }
 
+    const parsedSIG = sigParsingResult.parsed;
+
     logInfo('SIG parsed successfully', {
       ...context,
       dose_unit: parsedSIG.dose_unit,
       per_day: parsedSIG.per_day,
     });
 
-    // Step 2.5: Detect dosage form
-    const dosageForm = detectDosageForm(
+    // Step 2.5: Detect dosage form with metadata
+    const dosageFormResult = detectDosageFormWithMetadata(
       request.drug_input,
       merged.ndcs,
       parsedSIG.dose_unit
     );
+    const dosageForm = dosageFormResult.detected;
 
     logInfo('Dosage form detected', {
       ...context,
       dosage_form: dosageForm,
     });
 
-    // Step 3: Calculate quantity
-    const computed = calculateQuantity(
+    // Step 3: Calculate quantity with rounding details
+    // Pass available packages to help determine pen/vial format for insulin
+    const quantityResult = calculateQuantityWithRounding(
       parsedSIG,
       request.days_supply,
       dosageForm,
       request.drug_input,
-      request.quantity_unit_override
+      request.quantity_unit_override,
+      merged.ndcs // Pass available packages for insulin pen/vial detection
     );
+    const computed = quantityResult.computed;
 
     logInfo('Quantity calculated', {
       ...context,
@@ -312,22 +408,76 @@ export async function handleCompute(
       per_day: computed.per_day,
     });
 
-    // Step 4: Select packages
-    const packageSelection = selectPackages(
+    // Step 4: Select packages with scoring details
+    // Calculate base quantity before rounding for accurate overfill calculation
+    const baseQty = parsedSIG.per_day * request.days_supply;
+    const packageSelectionWithScoring = selectPackagesWithScoring(
       merged.ndcs,
-      computed.total_qty,
+      computed.total_qty, // Use rounded quantity for package matching
       {
         maxPacks: 3, // MAX_PACKS from config
         maxOverfill: 0.10, // OVERFILL_MAX from config (10%)
         preferredNdcs: request.preferred_ndcs,
+        baseQty, // Pass base quantity for overfill calculation
       }
     );
+    const packageSelection = {
+      chosen: packageSelectionWithScoring.chosen,
+      alternates: packageSelectionWithScoring.alternates,
+    };
 
     logInfo('Package selection completed', {
       ...context,
       hasChosen: !!packageSelection.chosen,
       alternatesCount: packageSelection.alternates.length,
     });
+
+    // Build reasoning data
+    const reasoning = {
+      api_calls: apiCallResults,
+      sig_parsing: {
+        original_sig: request.sig,
+        method: sigParsingResult.method,
+        sub_method: sigParsingResult.sub_method,
+        parsed: sigParsingResult.parsed ? {
+          dose_unit: sigParsingResult.parsed.dose_unit,
+          per_day: sigParsingResult.parsed.per_day,
+          quantity_per_dose: sigParsingResult.quantity_per_dose || 1,
+          frequency: sigParsingResult.frequency || sigParsingResult.parsed.per_day,
+        } : null,
+        unit_conversion: sigParsingResult.unit_conversion,
+      },
+      dosage_form: {
+        detected: dosageFormResult.detected,
+        method: dosageFormResult.method,
+        matched_keywords: dosageFormResult.matched_keywords,
+      },
+      quantity_calculation: {
+        base_calculation: {
+          per_day: computed.per_day,
+          days_supply: request.days_supply,
+          total_qty: computed.per_day * request.days_supply,
+        },
+        rounding: quantityResult.rounding,
+        final_qty: computed.total_qty,
+      },
+      package_selection: {
+        total_qty: computed.total_qty,
+        available_ndcs: {
+          total: merged.ndcs.length,
+          active: merged.ndcs.filter((pkg) => pkg.active).length,
+          inactive: merged.ndcs.filter((pkg) => !pkg.active).length,
+        },
+        considered_options: packageSelectionWithScoring.scoring_details?.considered_options || 0,
+        scoring: {
+          max_packs: 3,
+          max_overfill: 0.10,
+          preferred_ndcs: request.preferred_ndcs,
+        },
+        chosen: packageSelectionWithScoring.scoring_details?.chosen || null,
+        alternates_count: packageSelection.alternates.length,
+      },
+    };
 
     // Build response
     const response: ComputeResponse = {
@@ -350,6 +500,7 @@ export async function handleCompute(
         mismatch: merged.mismatch,
         notes: [],
       },
+      reasoning,
     };
 
     // Add notes for partial failures
@@ -362,7 +513,17 @@ export async function handleCompute(
 
     // Add note if no active NDCs available
     if (merged.ndcs.length > 0 && merged.ndcs.every((pkg) => !pkg.active)) {
-      response.flags.notes?.push('No active NDCs available for this drug');
+      // Check if the drug_input itself is an inactive NDC
+      const normalizedInput = request.drug_input.replace(/[-\s]/g, '');
+      const isDirectInactiveNDC = merged.ndcs.some(
+        (pkg) => pkg.ndc === normalizedInput && !pkg.active
+      );
+      
+      if (isDirectInactiveNDC) {
+        response.flags.notes?.push('The specified NDC is inactive');
+      } else {
+        response.flags.notes?.push('No active NDCs available for this drug');
+      }
     }
 
     // Add note if no package was selected

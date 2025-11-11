@@ -23,12 +23,18 @@ export type ComputeRequest = {
 };
 
 /**
+ * Dosage form type
+ */
+export type DosageFormType = 'inhaler' | 'insulin' | 'liquid' | 'solid';
+
+/**
  * Response payload from the compute API endpoint
  * 
  * @property rxnorm - Normalized RxNorm data
  * @property computed - Calculated quantities
  * @property ndc_selection - Chosen package and alternates
  * @property flags - Warnings and status flags
+ * @property reasoning - Optional detailed reasoning data showing step-by-step logic
  */
 export type ComputeResponse = {
   rxnorm: { rxcui: string; name: string };
@@ -38,6 +44,58 @@ export type ComputeResponse = {
     alternates: { ndc: string; pkg_size: number; active: boolean; overfill: number; packs: number }[];
   };
   flags: { inactive_ndcs: string[]; mismatch: boolean; notes?: string[]; error_code?: string | null };
+  reasoning?: {
+    api_calls: {
+      rxnorm?: { rxcui: string | null; name: string | null; ndcs: string[]; failed: boolean };
+      fda?: { ndcs: NDCPackageData[]; failed: boolean; isDirectNDC: boolean };
+      execution_time_ms: number;
+    };
+    sig_parsing: {
+      original_sig: string;
+      method: 'rules' | 'ai' | 'failed';
+      sub_method?: 'time-based' | 'frequency-based'; // Sub-method for rules-based parsing
+      parsed: { dose_unit: string; per_day: number; quantity_per_dose: number; frequency: number } | null;
+      unit_conversion?: { from: string; to: string; original: number; converted: number };
+    };
+    dosage_form: {
+      detected: DosageFormType;
+      method: string;
+      matched_keywords?: string[];
+    };
+    quantity_calculation: {
+      base_calculation: { per_day: number; days_supply: number; total_qty: number };
+      rounding: {
+        applied: boolean;
+        rule: string;
+        before: number;
+        after: number;
+        details?: Record<string, unknown>;
+      };
+      final_qty: number;
+    };
+    package_selection: {
+      total_qty: number;
+      available_ndcs: { total: number; active: number; inactive: number };
+      considered_options: number;
+      scoring: {
+        max_packs: number;
+        max_overfill: number;
+        preferred_ndcs?: string[];
+      };
+      chosen: {
+        ndc: string;
+        score: number;
+        score_breakdown: {
+          base_score: number;
+          overfill_penalty?: number;
+          pack_penalty?: number;
+          preferred_boost?: number;
+        };
+        reason: string;
+      } | null;
+      alternates_count: number;
+    };
+  };
 };
 
 /**
@@ -88,5 +146,6 @@ export type NDCPackageData = {
   active: boolean;
   dosage_form?: string;
   brand_name?: string;
+  package_description?: string; // Store package description for pen/vial detection
 };
 
