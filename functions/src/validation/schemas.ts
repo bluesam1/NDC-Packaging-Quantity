@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod';
-import type { ComputeRequest, ErrorCode } from '../types/index.js';
+import type { ComputeRequest, ErrorCode } from '../types/index';
 
 /**
  * Validates NDC format (11 digits with optional hyphens)

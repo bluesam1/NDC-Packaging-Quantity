@@ -119,12 +119,16 @@ app.get('/drug/ndc.json', async (req, res) => {
   }
   
   // Default mock response
+  // Note: FDA API uses 'active' field with 'TRUE'/'FALSE' string values
   const defaultResponse = {
     results: [
       {
         product_ndc: ndc || '00000-1111-22',
         package_ndc: ndc || '00000-1111-22',
         package_description: '30 CAPSULE in 1 BOTTLE',
+        package_size: '30',
+        active: 'TRUE', // FDA API uses 'TRUE'/'FALSE' strings
+        dosage_form: 'CAPSULE',
         marketing_status: 'Active',
         marketing_start_date: '20200101',
         ...(brandName && { brand_name: brandName }),

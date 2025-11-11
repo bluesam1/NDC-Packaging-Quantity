@@ -73,3 +73,20 @@ export type ErrorResponse = {
   field_errors?: Array<{ field: string; message: string }>;
 };
 
+/**
+ * NDC Package Data from FDA API
+ * 
+ * @property ndc - NDC code (11 digits)
+ * @property pkg_size - Package size (number of units per package)
+ * @property active - Active status (true if active, false if inactive)
+ * @property dosage_form - Dosage form (e.g., "TABLET", "CAPSULE", "LIQUID")
+ * @property brand_name - Brand name (optional)
+ */
+export type NDCPackageData = {
+  ndc: string;
+  pkg_size: number;
+  active: boolean;
+  dosage_form?: string;
+  brand_name?: string;
+};
+
