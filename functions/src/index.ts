@@ -6,6 +6,7 @@
  * Functions:
  * - health: Health check endpoint (GET /api/v1/health)
  * - compute: Main compute endpoint (POST /api/v1/compute)
+ * - extractPrescription: OCR endpoint for prescription image extraction (POST /api/v1/extract-prescription)
  * 
  * Environment Variables:
  * - USE_MOCK_APIS: Set to 'true' to use mock APIs instead of real APIs (default: false)
@@ -16,13 +17,23 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
-// import { defineSecret } from 'firebase-functions/params'; // Will be used in Epic 2
+import { defineSecret } from 'firebase-functions/params';
 import cors from 'cors';
-import type { ComputeResponse, ErrorResponse } from './types/index.js';
+import { handleCompute } from './handlers/compute';
+import { handleExtractPrescription } from './handlers/extractPrescription';
+import { validateComputeRequestSafe, validateExtractPrescriptionRequestSafe } from './validation/schemas';
+import { errorToResponse } from './utils/errors';
+import type { ErrorResponse } from './types/index';
+import { 
+  generateCorrelationId, 
+  logError, 
+  logRequestStart, 
+  logRequestEnd 
+} from './utils/logger';
+import { recordCounter, recordHistogram, METRICS } from './utils/metrics';
 
-// Define secrets for API keys (will be used in Epic 2)
-// const openaiApiKey = defineSecret('OPENAI_API_KEY');
-// const apiKey = defineSecret('API_KEY');
+// Define secrets for API keys
+const openaiApiKey = defineSecret('OPENAI_API_KEY');
 
 // CORS configuration
 // In production, allow only Firebase Hosting origin
@@ -56,6 +67,8 @@ const corsOptions = {
 
     callback(new Error('Not allowed by CORS'));
   },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 };
 
@@ -74,7 +87,27 @@ export const health = onRequest(
   },
   (req, res) => {
     corsMiddleware(req, res, () => {
+      const correlationId = generateCorrelationId();
+      const startTime = Date.now();
+      
+      logRequestStart(correlationId, req.method, '/health', {
+        userAgent: req.get('user-agent'),
+      });
+      
+      recordCounter(METRICS.REQUEST_TOTAL, 1, {
+        method: req.method,
+        path: '/health',
+      });
+      
       if (req.method !== 'GET') {
+        const duration = Date.now() - startTime;
+        logRequestEnd(correlationId, req.method, '/health', 405, duration);
+        recordHistogram(METRICS.REQUEST_DURATION, duration, {
+          method: req.method,
+          path: '/health',
+          status: '405',
+        });
+        
         res.status(405).json({
           error: 'Method Not Allowed',
           error_code: 'validation_error',
@@ -82,12 +115,22 @@ export const health = onRequest(
         return;
       }
 
-      res.status(200).json({
+      const response = {
         status: 'ok',
         timestamp: new Date().toISOString(),
         version: '1.0.0',
         service: 'ndc-qty-calculator',
+      };
+      
+      const duration = Date.now() - startTime;
+      logRequestEnd(correlationId, req.method, '/health', 200, duration);
+      recordHistogram(METRICS.REQUEST_DURATION, duration, {
+        method: req.method,
+        path: '/health',
+        status: '200',
       });
+      
+      res.status(200).json(response);
     });
   }
 );
@@ -101,8 +144,7 @@ export const health = onRequest(
 export const compute = onRequest(
   {
     region: 'us-central1',
-    // Secrets will be added when API keys are configured
-    // secrets: [openaiApiKey, apiKey],
+    secrets: [openaiApiKey],
   },
   (req, res) => {
     corsMiddleware(req, res, async () => {
@@ -115,50 +157,234 @@ export const compute = onRequest(
         return;
       }
 
+      // Generate correlation ID for logging
+      const correlationId = generateCorrelationId();
+      const startTime = Date.now();
+      
+      logRequestStart(correlationId, req.method, '/compute', {
+        userAgent: req.get('user-agent'),
+      });
+      
+      recordCounter(METRICS.REQUEST_TOTAL, 1, {
+        method: req.method,
+        path: '/compute',
+      });
+      
       try {
-        // TODO: Parse and validate request body (will use validation from Story 1.2)
-        // TODO: Call RxNorm + FDA APIs
-        // TODO: Run selection logic
-        // For now, return placeholder response
-        const placeholderResponse: ComputeResponse = {
-          rxnorm: {
-            rxcui: '12345',
-            name: 'placeholder',
-          },
-          computed: {
-            dose_unit: 'cap',
-            per_day: 2,
-            total_qty: 60,
-            days_supply: 30,
-          },
-          ndc_selection: {
-            chosen: {
-              ndc: '00000-1111-22',
-              pkg_size: 60,
-              active: true,
-              overfill: 0,
-              packs: 1,
-            },
-            alternates: [],
-          },
-          flags: {
-            inactive_ndcs: [],
-            mismatch: false,
-            notes: [],
-          },
-        };
+        // Parse and validate request body
+        const validationResult = validateComputeRequestSafe(req.body);
+        if (!validationResult.success) {
+          const duration = Date.now() - startTime;
+          // Use 400 for validation errors (invalid input format, missing fields, etc.)
+          const statusCode = 400;
+          logRequestEnd(correlationId, req.method, '/compute', statusCode, duration);
+          recordHistogram(METRICS.REQUEST_DURATION, duration, {
+            method: req.method,
+            path: '/compute',
+            status: String(statusCode),
+          });
+          recordCounter(METRICS.REQUEST_ERROR, 1, {
+            method: req.method,
+            path: '/compute',
+            status: String(statusCode),
+          });
+          
+          res.status(statusCode).json({
+            error: 'Invalid request',
+            error_code: 'validation_error',
+            field_errors: validationResult.field_errors,
+          } as ErrorResponse);
+          return;
+        }
 
-        res.status(200).json(placeholderResponse);
+        // Call compute handler
+        const response = await handleCompute(validationResult.data, correlationId);
+        
+        const duration = Date.now() - startTime;
+        logRequestEnd(correlationId, req.method, '/compute', 200, duration);
+        recordHistogram(METRICS.REQUEST_DURATION, duration, {
+          method: req.method,
+          path: '/compute',
+          status: '200',
+        });
+        
+        res.status(200).json(response);
       } catch (error: unknown) {
-        // Error handling
-        const errorMessage = error instanceof Error ? error.message : 'Internal Server Error';
-        const errorResponse: ErrorResponse = {
-          error: errorMessage,
-          error_code: 'internal_error',
-          detail: 'An unexpected error occurred while processing the request',
-        };
+        const duration = Date.now() - startTime;
+        
+        // Error handling - convert to ErrorResponse format
+        const errorResponse = errorToResponse(error);
+        const statusCode = error instanceof Error && 'statusCode' in error
+          ? (error as { statusCode: number }).statusCode
+          : 500;
+        
+        logError('Request error', {
+          correlationId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+        
+        logRequestEnd(correlationId, req.method, '/compute', statusCode, duration);
+        recordHistogram(METRICS.REQUEST_DURATION, duration, {
+          method: req.method,
+          path: '/compute',
+          status: statusCode.toString(),
+        });
+        recordCounter(METRICS.REQUEST_ERROR, 1, {
+          method: req.method,
+          path: '/compute',
+          status: statusCode.toString(),
+        });
 
-        res.status(500).json(errorResponse);
+        res.status(statusCode).json(errorResponse);
+      }
+    });
+  }
+);
+
+/**
+ * Extract prescription endpoint
+ * 
+ * POST /api/v1/extract-prescription
+ * Extracts prescription information from uploaded image using OCR
+ */
+export const extractPrescription = onRequest(
+  {
+    region: 'us-central1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 60, // 60 seconds for OCR processing
+    maxInstances: 10,
+  },
+  (req, res) => {
+    // Handle OPTIONS preflight requests before CORS middleware
+    if (req.method === 'OPTIONS') {
+      corsMiddleware(req, res, () => {
+        res.status(200).end();
+      });
+      return;
+    }
+
+    corsMiddleware(req, res, async () => {
+      // Only allow POST requests
+      if (req.method !== 'POST') {
+        res.status(405).json({
+          error: 'Method Not Allowed',
+          error_code: 'validation_error',
+        } as ErrorResponse);
+        return;
+      }
+
+      // Generate correlation ID for logging
+      const correlationId = generateCorrelationId();
+      const startTime = Date.now();
+      
+      logRequestStart(correlationId, req.method, '/extract-prescription', {
+        userAgent: req.get('user-agent'),
+      });
+      
+      recordCounter(METRICS.REQUEST_TOTAL, 1, {
+        method: req.method,
+        path: '/extract-prescription',
+      });
+      
+      try {
+        // Parse and validate request body
+        const validationResult = validateExtractPrescriptionRequestSafe(req.body);
+        if (!validationResult.success) {
+          const duration = Date.now() - startTime;
+          const statusCode = 400;
+          logRequestEnd(correlationId, req.method, '/extract-prescription', statusCode, duration);
+          recordHistogram(METRICS.REQUEST_DURATION, duration, {
+            method: req.method,
+            path: '/extract-prescription',
+            status: String(statusCode),
+          });
+          recordCounter(METRICS.REQUEST_ERROR, 1, {
+            method: req.method,
+            path: '/extract-prescription',
+            status: String(statusCode),
+          });
+          
+          res.status(statusCode).json({
+            error: 'Invalid request',
+            error_code: 'validation_error',
+            field_errors: validationResult.field_errors,
+          } as ErrorResponse);
+          return;
+        }
+
+        // Extract base64 image data (remove data URL prefix if present)
+        let imageBase64 = validationResult.data.image;
+        if (imageBase64.includes(',')) {
+          imageBase64 = imageBase64.split(',')[1];
+        }
+
+        // Validate image size (10MB max)
+        const imageSizeBytes = Buffer.from(imageBase64, 'base64').length;
+        const maxSizeBytes = 10 * 1024 * 1024; // 10MB
+        if (imageSizeBytes > maxSizeBytes) {
+          const duration = Date.now() - startTime;
+          const statusCode = 400;
+          logRequestEnd(correlationId, req.method, '/extract-prescription', statusCode, duration);
+          recordHistogram(METRICS.REQUEST_DURATION, duration, {
+            method: req.method,
+            path: '/extract-prescription',
+            status: String(statusCode),
+          });
+          recordCounter(METRICS.REQUEST_ERROR, 1, {
+            method: req.method,
+            path: '/extract-prescription',
+            status: String(statusCode),
+          });
+          
+          res.status(statusCode).json({
+            error: 'Image too large',
+            error_code: 'validation_error',
+            detail: `Image size exceeds 10MB limit. Current size: ${(imageSizeBytes / 1024 / 1024).toFixed(2)}MB`,
+          } as ErrorResponse);
+          return;
+        }
+
+        // Call extract handler
+        const response = await handleExtractPrescription(imageBase64, correlationId);
+        
+        const duration = Date.now() - startTime;
+        logRequestEnd(correlationId, req.method, '/extract-prescription', 200, duration);
+        recordHistogram(METRICS.REQUEST_DURATION, duration, {
+          method: req.method,
+          path: '/extract-prescription',
+          status: '200',
+        });
+        
+        res.status(200).json(response);
+      } catch (error: unknown) {
+        const duration = Date.now() - startTime;
+        
+        // Error handling - convert to ErrorResponse format
+        const errorResponse = errorToResponse(error);
+        const statusCode = error instanceof Error && 'statusCode' in error
+          ? (error as { statusCode: number }).statusCode
+          : 500;
+        
+        logError('Extract prescription error', {
+          correlationId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+        
+        logRequestEnd(correlationId, req.method, '/extract-prescription', statusCode, duration);
+        recordHistogram(METRICS.REQUEST_DURATION, duration, {
+          method: req.method,
+          path: '/extract-prescription',
+          status: statusCode.toString(),
+        });
+        recordCounter(METRICS.REQUEST_ERROR, 1, {
+          method: req.method,
+          path: '/extract-prescription',
+          status: statusCode.toString(),
+        });
+
+        res.status(statusCode).json(errorResponse);
       }
     });
   }
