@@ -118,7 +118,9 @@
 		{/if}
 		
 		<QuantityDisplay
-			quantity={results.computed.total_qty}
+			quantity={results.ndc_selection.chosen 
+				? results.ndc_selection.chosen.pkg_size * results.ndc_selection.chosen.packs 
+				: results.computed.total_qty}
 			unit={results.computed.dose_unit}
 		/>
 		
