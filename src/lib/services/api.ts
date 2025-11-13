@@ -30,19 +30,26 @@ export class ApiError extends Error {
  * Get API base URL from environment variable
  */
 function getApiUrl(): string {
+	// In production builds, ALWAYS use relative URLs regardless of VITE_API_URL
+	// This ensures Firebase Hosting rewrites work correctly
+	// Vite sets MODE to 'production' during build, and DEV is false in production builds
+	const isProduction = import.meta.env.MODE === 'production' || import.meta.env.PROD || !import.meta.env.DEV;
+	
+	if (isProduction) {
+		// Production: Use relative URLs (Firebase Hosting rewrites handle routing)
+		// Ignore VITE_API_URL even if set, to prevent localhost from being baked into the build
+		return '';
+	}
+	
+	// Development: Check for explicit VITE_API_URL first
 	const apiUrl = import.meta.env.VITE_API_URL;
 	if (apiUrl) {
 		return apiUrl;
 	}
 	
 	// Default to local development if no URL is set
-	if (import.meta.env.DEV) {
-		const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'your-project-id';
-		return `http://localhost:5001/${projectId}/us-central1`;
-	}
-	
-	// Production fallback (should be set via environment variable)
-	throw new Error('VITE_API_URL environment variable is not set');
+	const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'ndc-calculator';
+	return `http://localhost:5001/${projectId}/us-central1`;
 }
 
 /**
@@ -97,9 +104,13 @@ export async function computeQuantity(
 	// In emulator, functions are directly accessible without /api/v1 prefix
 	// Check if we're using the functions emulator (port 5001) vs hosting emulator (port 5000)
 	const isFunctionsEmulator = apiUrl.includes(':5001');
+	// Construct endpoint: if apiUrl is empty (production), use relative path
+	// Otherwise, prepend the apiUrl
 	const endpoint = isFunctionsEmulator 
 		? `${apiUrl}/compute` 
-		: `${apiUrl}/api/v1/compute`;
+		: apiUrl 
+			? `${apiUrl}/api/v1/compute`
+			: `/api/v1/compute`;
 	
 	const { controller, timeoutId } = createTimeoutController();
 	
@@ -196,9 +207,13 @@ export async function extractPrescriptionFromImage(
 }> {
 	const apiUrl = getApiUrl();
 	const isFunctionsEmulator = apiUrl.includes(':5001');
+	// Construct endpoint: if apiUrl is empty (production), use relative path
+	// Otherwise, prepend the apiUrl
 	const endpoint = isFunctionsEmulator 
 		? `${apiUrl}/extractPrescription` 
-		: `${apiUrl}/api/v1/extract-prescription`;
+		: apiUrl 
+			? `${apiUrl}/api/v1/extract-prescription`
+			: `/api/v1/extract-prescription`;
 	
 	// Use longer timeout for OCR requests
 	const controller = new AbortController();
